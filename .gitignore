@@ -1,0 +1,39 @@
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Personal and local-only files
+CLAUDE.local.md
+.claude/settings.local.json
+sandbox/
+data/
+vaults/
+.claude/
+.env.example
+
+# Tool state if a test vault is created inside the repo
+.decide/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Editors and OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Obsidian workspace files if a vault is opened inside the repo
+.obsidian/workspace*.json
