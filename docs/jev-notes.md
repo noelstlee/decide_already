@@ -16,7 +16,7 @@ Jev is TypeSafe AI's decision model (they call the class "System One models"). Y
 
 - Endpoint: `POST https://api.typesafe.ai/v1/systemone` with `Authorization: Bearer <API_KEY>` ([API docs](https://docs.typesafe.ai/api)).
 - Request body: `{"model": ..., "state": ..., "questions": {"<your id>": {...}}}`. Jev reads the state once and answers every question against it in parallel.
-- Python SDK: `pip install typesafe-sdk`, key in `TYPESAFE_API_KEY` (verify; [flaviocopes](https://flaviocopes.com/jev-api-key/)). Calling the endpoint with httpx is fine if the SDK doesn't fit.
+- Python SDK: `typesafe-sdk` on PyPI (official, MIT, Python 3.10+; 0.7.5 released 2026-10-14; verified 2026-10-25 against [the SDK docs](https://docs.typesafe.ai/sdk/python.md)). Key in `TYPESAFE_API_KEY`; `TYPESAFE_BASE_URL` and `TYPESAFE_DEFAULT_MODEL` also exist. The default model is `jev-latest`, so always pass the pin. Default retry policy retries 408, 429 and 5xx with backoff and honors Retry-After. Depends on `httpx2` (Pydantic's continuation of httpx), not `httpx`. Debug logging writes request and response bodies, so keep its logger at info or off.
 - Access: TypeSafe reportedly paused new signups on 2026-09-22; existing keys still work, and Vercel AI Gateway (`typesafe-ai/jev`) is a reported fallback (verify; same source). This matters for an open-source tool where users bring their own key, so keep the backend swappable.
 
 ## Limits and price ([Models](https://docs.typesafe.ai/models))

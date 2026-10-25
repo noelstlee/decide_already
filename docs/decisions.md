@@ -4,6 +4,8 @@ Newest first. "Decided" means Stan made the call; "Proposed" means it is in a bl
 
 | Date | Decision | Status | Why |
 | --- | --- | --- | --- |
+| 2026-10-25 | Jev client: the official `typesafe-sdk`, pinned at 0.7.5, imported only inside `backends/jev.py`; raw httpx not used | Decided | Official and MIT; Pydantic v2; retries honor Retry-After; raw response exposed for the log; no telemetry; option order preserved. Early (two breaking changes in Sept 2026), so pin exactly |
+| 2026-10-25 | Stack confirmed as in `CLAUDE.md`: Python 3.12 via uv, Pydantic v2, Typer, PyYAML, pytest, ruff; PDF and slide extractors join with the public dataset | Decided | Approved with the Phase 0 build plan |
 | 2026-10-24 | Repo `docs/` is the working copy of the design; the Claude Docs blueprints are snapshots | Proposed | Claude Code reads the repo; one place to edit avoids drift |
 | 2026-10-24 | CLM is not a replacement for Jev in Phase 0 or 1; it is a candidate second backend and Phase 2 local model | Proposed | Open (Apache 2.0) and local, but evidence is thin and off-task; weak on subtle judgments in the one independent test; 2048-token default context |
 | 2026-10-24 | Smoke-test Phase 0 on personal files before any course files | Decided | Checks the concept fast, with no instructor OK needed |
@@ -24,7 +26,6 @@ Newest first. "Decided" means Stan made the call; "Proposed" means it is in a bl
 ## Still open
 
 - Jev version to pin: `jev-1.14.0` or `jev-1.13.0` (one for both phases).
-- Code stack: the defaults in `CLAUDE.md` are proposals.
 - License for the repo.
 - CLI and tool-folder names (`p0`, `.decide/`).
 - Whether design docs stay public in this repo.
