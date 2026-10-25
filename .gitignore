@@ -37,3 +37,6 @@ htmlcov/
 
 # Obsidian workspace files if a vault is opened inside the repo
 .obsidian/workspace*.json
+
+# smoke test
+smoke_test/
