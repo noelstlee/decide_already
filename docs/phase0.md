@@ -248,7 +248,7 @@ Phase 0 passes if the card-based sort beats file-name rules and embedding simila
 ### Dataset
 
 - **Smoke test (step 0):** 10 synthetic course files of mixed types (markdown, text, Python, notebook, PDF, slides), written by `scripts/make_smoke_vault.py`, with the walkthrough's groups. No metrics, just "does the loop work and do the picks look sane".
-- **Public course:** [MIT OCW 6.867 Machine Learning, Fall 2006](https://ocw.mit.edu/courses/6-867-machine-learning-fall-2006/resources/hw2_soln/), under CC BY-NC-SA 4.0. It has a syllabus, lecture notes, problem sets and solutions, exams and projects, all as PDFs, with a whole-course download.
+- **Public course:** [MIT OCW 6.867 Machine Learning, Fall 2006](https://ocw.mit.edu/courses/6-867-machine-learning-fall-2006/resources/hw2_soln/), under CC BY-NC-SA 4.0, with a whole-course download. It has lecture notes, problem sets and solutions, and exams and solutions as PDFs, a few Matlab files and data archives. The syllabus and the project description exist only as web pages, and there are no project files, so Logistics and Projects have one gold file each.
 - **Code files:** 6.867 has none, so the lab notebooks, their solutions and the helper modules of MIT 6.S191 (GitHub `MITDeepLearning/introtodeeplearning`, MIT license) are added to test HW code.
 - **CS 4641/7641:** joins once the instructor OKs sending it to TypeSafe.
 - **Gold labels:** written by code before the first sort, from the sources' own metadata (OCW's resource types, the repo's folders). You spot-check a sample. Hand labels by you remain the stricter option and can replace them later. The final groups after corrections are reported separately, since seeing Jev's pick first pulls a label toward it.

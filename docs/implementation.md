@@ -22,6 +22,7 @@ How the spec in [phase0.md](phase0.md) maps to code. This is the working contrac
 | `cli.py` | The `p0` commands, thin wrappers only | 1, 4, 5 |
 | `ui/server.py`, `ui/static/` | Local web UI over the same functions | UI |
 | `eval/` | Dataset, gold labels, baselines, variants, metrics, experiments, report | 6, 7, 8 |
+| `scripts/make_smoke_vault.py` | Writes the ten synthetic smoke files into `sandbox/smoke/_dump/` | 0 |
 
 ## Rules for all code
 
@@ -119,7 +120,8 @@ def build_questions(groups: list[Group], rng: random.Random, with_descriptions: 
 - `group`: a Choice. Instructions: "Which group does this document belong in?". Criteria: one entry per group, keyed by the group name, in shuffled order. The value is `{"covers": ..., "excludes": ...}` (no `excludes` key when the group has none), or `None` when `with_descriptions` is false.
 - `fits_any`: a Noul answered on its own, so it must carry the group descriptions itself. Instructions are a JSON object with the statement "This document clearly belongs in one of these groups." and the same groups in the same shuffled order. Criteria: `true` is "The document's content matches what one of the groups covers.", `false` is "The document is about something that none of the groups cover.". With `with_descriptions` false, only the names are listed.
 - There is no "none of these" option. Unsorted is decided in code.
-- Check the exact shapes against the live docs before relying on them: https://docs.typesafe.ai/primitives/choice.md, https://docs.typesafe.ai/primitives/noul.md and https://docs.typesafe.ai/primitives/advanced.md.
+- `build_questions` raises `ValueError` when there are no groups or two groups share a name.
+- The shapes were checked against the live docs (https://docs.typesafe.ai/primitives/choice.md, noul.md, advanced.md) and against the live API on 2026-11-15. A probe on five hand-written cards showed why `fits_any` carries the descriptions: with group names only it scored an unrelated checklist 0.67 and a syllabus 0.57; with descriptions, 0.11 and 0.97.
 
 ## Jev backend (`backends/jev.py`, `log.py`)
 
@@ -134,10 +136,11 @@ class JevBackend:
 def make_backend(root: Path, config: Config) -> Backend   # in backends/__init__.py; key from env_value("TYPESAFE_API_KEY", root)
 ```
 
-- One `TypeSafeClient` per backend, built with the key, a `RetryPolicy` (retries 408, 429 and 5xx with backoff, honors Retry-After) and an explicit timeout. `transport` is for tests.
+- One `TypeSafeClient` per backend, built with the key, a `RetryPolicy` (up to 4 retries on 408, 429 and 5xx with backoff, honors Retry-After, 60 seconds in all) and a 30 second timeout per HTTP operation. `transport` is for tests.
+- The key is passed in as `api_key`. Only `make_backend` looks it up.
 - Every call passes `model=config.model`. If the response's `model` differs from the pin, log the call and raise `BackendError`.
 - A missing key raises `BackendError` with a message that names `TYPESAFE_API_KEY` and `.env`. The key is never logged.
-- Before each request, compare the spend so far with `config.max_spend_usd`. Spend is `input tokens / 1e6 * config.usd_per_million_tokens`, counted from the log at start and updated per call. At or over the cap, raise `BudgetExceeded` without sending.
+- Before each request, compare the spend so far with `config.max_spend_usd`. Spend is `input tokens / 1e6 * config.usd_per_million_tokens`, counted from the log at start and updated per call. Every call that reports input tokens counts, usable or not, because it was billed. At or over the cap, raise `BudgetExceeded` without sending (and without a log line).
 - Probabilities come back keyed by group name. Convert to group ids. `option_order` is the shuffled order as ids.
 - Safe to call from several threads: guard the log append and the spend counter with a lock.
 - The SDK's own logger stays at its default. Our log is the record.
@@ -153,9 +156,9 @@ One line per call in `.decide/jev.jsonl`:
  "input_tokens": 2710, "request_id": "req_...", "latency_ms": 412.3, "status": "ok", "error": null}
 ```
 
-`request` is exactly what was sent. `response` is the raw JSON body. A failed call is logged with `status: "error"`, `response: null` and the error text.
+`request` is exactly what was sent. `response` is the raw JSON body. A call with no usable body (an HTTP error, a timeout) is logged with `status: "error"`, `response: null` and the error text. A call that was answered but cannot be used (another model version answered, an answer is missing) is also `status: "error"`, but keeps its response, tokens and request id.
 
-`log.py`: `append_jsonl(path, record)`, `read_jsonl(path) -> list[dict]`, `total_input_tokens(path) -> int` (only `status: "ok"` lines).
+`log.py`: `append_jsonl(path, record)`, `read_jsonl(path) -> list[dict]`, `total_input_tokens(path) -> int` (every line that has `input_tokens`). A line that is not a JSON object raises `ValueError` naming the file and line.
 
 The fake for tests, in `tests/fakes.py` (import it with `from fakes import FakeBackend`):
 
@@ -188,7 +191,7 @@ def judge(card: Card, groups: list[Group], set_version: int, backend: Backend, v
 | at or over | at or over | under `close_call_margin` | placed in the top group, `close_call` true |
 | at or over | at or over | at or over | placed in the top group |
 
-With one group, the second probability counts as 0. Ties go to the lower group id. `judge` sends one request per state and averages `probs` and `fits_any` when there are several (window vote); tokens and latency are summed.
+With one group, the second probability counts as 0. Ties go to the lower group id. A value exactly at a cutoff counts as at or over. `judge` sends one request per state and averages `probs` and `fits_any` when there are several (window vote); tokens and latency are summed, and stay `None` when the backend reports none (the fake does not).
 
 Code alone handles two cases: a card with no states goes to Unsorted with reason `no_text`, `placed_by: code`, no model asked. A `BackendError` is never an answer: the file keeps its previous note, if any, and is reported.
 
@@ -228,7 +231,7 @@ class SortReport(StrictModel):
     close_calls: int
     frozen_skipped: int
     errors: dict[str, str]     # file id to message
-    spent_usd: float | None    # this vault's total so far, when the backend logs tokens
+    spent_usd: float | None    # this vault's total so far, from log.total_input_tokens on .decide/jev.jsonl
 
 def sort_vault(root: Path, backend: Backend, on_progress: Callable[[int, int], None] | None = None) -> SortReport
 ```
@@ -341,6 +344,9 @@ Dataset (`eval/dataset.py`, run as `python -m decide_already.eval.dataset`):
 - Gold labels come from the sources' own structure and never from a model: OCW's resource metadata for 6.867, the repo's folders for the labs. They are written before any sort, to `sandbox/eval/gold.jsonl`, one line per file: `{file_id, gold_group, source_url, source_type, license, sha256, split}`. `gold_group` is a group id, or `null` for a file that fits no group.
 - `split` is `dev` for 20% of the files and `test` for the rest, stratified by gold group, with a fixed seed.
 - `sandbox/eval/DATASET.md` lists sources, licenses, counts per group and the mapping used.
+- For other modules: `read_gold(eval_root) -> list[GoldLabel]` and `build_dataset(root, fetch=download) -> list[GoldLabel]`. The network step is the one `download(url, dest)` function.
+- The labs are pinned to a commit. Course pages are rendered from their metadata without the site's navigation. Pages that only list resources are left out. The build fails when the dump holds a file with no gold label.
+- As built on 2026-11-15: 95 files. Homework 52, Lecture notes 24, Exams 17, Projects 1, Logistics 1. Dev 18, test 77. Four zip archives (gold: Homework, all in test) have no extractable text.
 
 Baselines (`eval/baselines/`), each a `Backend`:
 
@@ -352,6 +358,13 @@ Baselines (`eval/baselines/`), each a `Backend`:
 
 Metrics (`eval/metrics.py`): top-1 accuracy overall and per group, macro-F1, accuracy among placed files, share Unsorted and how many of those had the right top group, expected calibration error of the top probability, cost and latency per file.
 
-Runner (`eval/run.py`, run as `python -m decide_already.eval.run`): runs every configuration (Jev with each of the five variants, plus each baseline on the card) over the dataset, caches every prediction in `sandbox/eval/results/` so nothing is paid for twice, tunes the three cutoffs on the dev split, reports on the test split, and writes `metrics.json` and `report.md`. All Jev calls go through one `JevBackend` logging to `sandbox/eval/.decide/jev.jsonl`, so the spend cap covers the whole evaluation.
+Runner (`eval/run.py`, run as `python -m decide_already.eval.run`): runs every configuration (Jev with each of the five variants, plus each baseline on the card) over the dataset, caches every prediction in `sandbox/eval/results/` so nothing is paid for twice, tunes the two Unsorted cutoffs on the dev split, reports on the test split, and writes `metrics.json` and `report.md`. All Jev calls go through one `JevBackend` logging to `sandbox/eval/.decide/jev.jsonl`, so the spend cap covers the whole evaluation.
+
+Scoring rules:
+
+- The headline number is top-1 accuracy on the test split over files that have extractable text, with the default cutoffs. Every configuration is scored on the same files.
+- Files with no extractable text never reach a model. They are counted and reported on their own line, and a second accuracy over all files (where they count as wrong for every content-based configuration) is given next to the headline.
+- A majority-class row (always the largest gold group) is reported for context.
+- Tuned cutoffs are reported next to the defaults, never instead of them. The dev split is small.
 
 Experiments (`eval/experiments.py`): group added mid-run (sort with `HELD_OUT_GROUP_ID` removed, then add it back and rerun the unfrozen files), and move versus description edit.
