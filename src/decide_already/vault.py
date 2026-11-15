@@ -45,7 +45,7 @@ def find_vault(start: Path) -> Path:
 
 def read_note(path: Path) -> tuple[dict, str]:
     """Split a markdown note into its YAML frontmatter (as a dict) and the body text below it."""
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8")
     match = _FRONTMATTER.match(text)
     if not match:
         return {}, text
@@ -56,7 +56,7 @@ def read_note(path: Path) -> tuple[dict, str]:
 def write_note(path: Path, frontmatter: dict, body: str = "") -> None:
     """Write a markdown note: the frontmatter between --- lines, then the body."""
     front = yaml.safe_dump(frontmatter, sort_keys=False, allow_unicode=True)
-    path.write_text(f"---\n{front}---\n{body}")
+    path.write_text(f"---\n{front}---\n{body}", encoding="utf-8")
 
 
 def slugify(name: str) -> str:
@@ -130,7 +130,7 @@ def latest_set(root: Path) -> GroupSet | None:
             versions.append(int(match.group(1)))
     if not versions:
         return None
-    data = yaml.safe_load(_set_path(root, max(versions)).read_text())
+    data = yaml.safe_load(_set_path(root, max(versions)).read_text(encoding="utf-8"))
     return GroupSet.model_validate(data)
 
 
@@ -143,7 +143,9 @@ def sync_group_set(root: Path) -> GroupSet:
     if current is not None and current.groups == groups:
         return current
     new = GroupSet(version=1 if current is None else current.version + 1, groups=groups)
-    _set_path(root, new.version).write_text(yaml.safe_dump(new.model_dump(), sort_keys=False))
+    _set_path(root, new.version).write_text(
+        yaml.safe_dump(new.model_dump(), sort_keys=False, allow_unicode=True), encoding="utf-8"
+    )
     return new
 
 

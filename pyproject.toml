@@ -40,6 +40,8 @@ default-groups = ["dev", "eval"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# PyMuPDF's compiled module triggers these on import; they are not ours to fix.
+filterwarnings = ["ignore:builtin type .* has no __module__ attribute:DeprecationWarning"]
 
 [tool.ruff]
 line-length = 100

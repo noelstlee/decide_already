@@ -49,16 +49,16 @@ def extract(path: Path) -> Extracted   # dispatches on the file extension
 
 | Kind | Extensions | Title | Outline | Text |
 | --- | --- | --- | --- | --- |
-| Markdown | `.md`, `.markdown` | first `#` heading, else first non-empty line | headings | the file |
-| Text | `.txt`, `.rst`, any other readable text | first non-empty line | none | the file |
-| Code | `.py`, `.m`, `.r`, `.jl`, `.js`, `.ts`, `.java`, `.c`, `.h`, `.cpp`, `.sh`, `.tex`, `.sql` | module docstring's first line or first comment line | function and class names (`ast` for Python, a simple regex elsewhere) | the file |
-| Notebook | `.ipynb` | first markdown heading | markdown headings, then function and class names | cell sources joined; outputs dropped |
-| PDF | `.pdf` | document title metadata if sensible, else first non-empty line | the PDF's table of contents, if it has one | text of every page (PyMuPDF) |
+| Markdown | `.md`, `.markdown` | first heading, else the first line that holds a word | headings | the file |
+| Text | `.txt`, `.rst`, any other readable text | the first line that holds a word | none | the file |
+| Code | `.py`, `.m`, `.r`, `.jl`, `.js`, `.ts`, `.java`, `.c`, `.h`, `.cpp`, `.sh`, `.tex`, `.sql` | module docstring's first line, or the first comment within the first 10 lines | function and class names (`ast` for Python, simple patterns elsewhere) | the file |
+| Notebook | `.ipynb` | first markdown heading | markdown headings, then function and class names | cell sources joined; outputs dropped (nbformat 4 only) |
+| PDF | `.pdf` | document title metadata if sensible, else the first line that holds a word | the PDF's table of contents, if it has one | text of every page (PyMuPDF) |
 | Slides | `.pptx` | first slide's title | slide titles | text of every slide (python-pptx) |
 | HTML | `.html`, `.htm` | `<title>` or first `<h1>` | `h1` to `h3` | visible text; only `<main>` or `<article>` when present; scripts, styles and nav dropped (stdlib `html.parser`) |
-| Anything else or binary | | none | none | `""` |
+| Anything else or binary (type `Binary file`) | | none | none | `""` |
 
-Read text as UTF-8 with `errors="replace"`. A file with NUL bytes in its first 8 KB is binary. Images are dropped. A file with no text gets `text=""` and later goes to Unsorted with reason `no_text`. Extractors never raise on a damaged file: they return `text=""`.
+Read text as UTF-8 with `errors="replace"`. A file with NUL bytes in its first 8 KB is binary. Images are dropped. Text is cleaned: control characters and base64 data URIs are removed. For Markdown and notebooks, leading headings that start with "Copyright" or "License" are passed over for the title (they stay in the outline); when there is no other heading, the first one is kept. A file with no text gets `text=""` and later goes to Unsorted with reason `no_text`. Extractors never raise on a damaged file: they return `text=""`.
 
 ## Card (`card.py`)
 
@@ -76,7 +76,7 @@ def build_card(path: Path, file_id: str, config: Config, variant: str | None = N
 def render_card(card: Card) -> str       # markdown body of the card note: name, type, title, outline, then the text the model saw
 ```
 
-The token count is an estimate (4 characters per token). The API's own `input_tokens` is logged per call as the real number.
+The token count is an estimate (4 characters per token). The API's own `input_tokens` is logged per call as the real number. `build_card` raises `ValueError` for an unknown variant and `OSError` for a file that cannot be opened; `extract` itself never raises.
 
 The default `card` state is a JSON object with named fields. Empty fields are left out, because an empty list or string can read as a signal:
 
@@ -102,7 +102,7 @@ Variants:
 | `card` | the object above | default |
 | `card_no_name` | the same without `file.name` and `file.path` (`file.type` stays) | |
 | `full_text` | `{"file": {...}, "text": ...}` with the text cut at 30,000 tokens | one request |
-| `window_vote` | `{"file": {...}, "text": window}` per 2,000-token window; when there are more than 8 windows, 8 evenly spaced ones including the first and the last | one request per window; probabilities are averaged by `sort.judge` |
+| `window_vote` | `{"file": {...}, "text": window}` in equal windows of at most 2,000 tokens; when there are more than 8 windows, 8 evenly spaced ones including the first and the last | one request per window; probabilities are averaged by `sort.judge` |
 | `names_only` | same as `card` | the request sets `with_descriptions=False` |
 
 ## Questions (`questions.py`)
@@ -352,11 +352,11 @@ Baselines (`eval/baselines/`), each a `Backend`:
 
 | Baseline | How it sorts |
 | --- | --- |
-| `rules.py` | file name keywords and extensions per group; one-hot `probs`; `fits_any` 0 when no rule matches |
-| `embed.py` | cosine similarity between the card text (`state_text`) and each group's description, softmax into `probs`; a local model through `fastembed`; `fits_any` 1.0 |
-| `llm.py` | one Claude model through the Anthropic API, zero-shot, same card and groups; key from `env_value("ANTHROPIC_API_KEY")`; unavailable without a key |
+| `rules.py` | file name keywords and extensions per group, first match wins, written blind; one-hot `probs`; when no rule matches, `probs` is empty and `fits_any` is 0 (no pick) |
+| `embed.py` | cosine similarity between the card text (`state_text`) and each group's name and covers text, softmax into `probs`; a local model through `fastembed` (`BAAI/bge-small-en-v1.5`, which reads the first 512 tokens); `fits_any` 1.0. Excludes text is not embedded, since an embedding has no notion of "not". `chunk_chars` embeds the whole card in pieces and averages them |
+| `llm.py` | one Claude model (`claude-fable-5-2`) through the Anthropic API, zero-shot, same card and groups, a structured single choice, no fallback model; one-hot `probs`; reports input and output tokens; key from `env_value("ANTHROPIC_API_KEY")`; unavailable without a key |
 
-Metrics (`eval/metrics.py`): top-1 accuracy overall and per group, macro-F1, accuracy among placed files, share Unsorted and how many of those had the right top group, expected calibration error of the top probability, cost and latency per file.
+Metrics (`eval/metrics.py`): `Prediction`, `Cutoffs`, `summarize`, `outcome`, `tune_cutoffs`. Reported: top-1 accuracy overall and per group, macro-F1, accuracy among placed files, share Unsorted and how many of those had the right top group, expected calibration error of the top probability, cost (input and, where billed, output tokens) and latency per file. Top-1 ignores the cutoffs. `outcome` is the same truth table as `sort.decide`, written separately, and a test checks that the two agree. `tune_cutoffs` grid-searches the two Unsorted cutoffs to maximize right placements minus wrong placements; the defaults win ties.
 
 Runner (`eval/run.py`, run as `python -m decide_already.eval.run`): runs every configuration (Jev with each of the five variants, plus each baseline on the card) over the dataset, caches every prediction in `sandbox/eval/results/` so nothing is paid for twice, tunes the two Unsorted cutoffs on the dev split, reports on the test split, and writes `metrics.json` and `report.md`. All Jev calls go through one `JevBackend` logging to `sandbox/eval/.decide/jev.jsonl`, so the spend cap covers the whole evaluation.
 

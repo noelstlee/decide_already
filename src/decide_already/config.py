@@ -51,13 +51,15 @@ class Config(StrictModel):
     @classmethod
     def load(cls, vault: Path) -> "Config":
         """Read and validate a vault's config file."""
-        data = yaml.safe_load(cls.path(vault).read_text()) or {}
+        data = yaml.safe_load(cls.path(vault).read_text(encoding="utf-8")) or {}
         return cls.model_validate(data)
 
     def save(self, vault: Path) -> None:
         """Write this config to the vault, creating .decide/ if needed."""
         self.path(vault).parent.mkdir(parents=True, exist_ok=True)
-        self.path(vault).write_text(yaml.safe_dump(self.model_dump(), sort_keys=False))
+        self.path(vault).write_text(
+            yaml.safe_dump(self.model_dump(), sort_keys=False), encoding="utf-8"
+        )
 
 
 def decide_path(vault: Path, name: str) -> Path:
@@ -77,7 +79,7 @@ def env_value(name: str, start: Path | None = None) -> str | None:
     for folder in [here, *here.parents]:
         env_file = folder / ".env"
         if env_file.is_file():
-            for line in env_file.read_text().splitlines():
+            for line in env_file.read_text(encoding="utf-8").splitlines():
                 key, sep, raw = line.partition("=")
                 if sep and key.strip() == name:
                     found = raw.strip().strip("'\"")

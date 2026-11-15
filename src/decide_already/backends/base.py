@@ -20,13 +20,14 @@ class SortResult(StrictModel):
     """A backend's judgment of one file. Code turns it into a placement (see sort.decide)."""
 
     file_id: str
-    probs: dict[str, float]  # by group id; sums to about 1
+    probs: dict[str, float]  # by group id; sums to about 1; empty when the backend has no pick
     fits_any: (
         float  # probability that some group clearly fits; 1.0 for backends that cannot abstain
     )
     model: str  # the exact model version that answered
     option_order: list[str]  # group ids in the order they were sent
     input_tokens: int | None = None
+    output_tokens: int | None = None  # only for backends that bill output (the LLM baseline)
     request_id: str | None = None
     latency_ms: float | None = None
 
