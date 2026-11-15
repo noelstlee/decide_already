@@ -13,7 +13,7 @@
 
 ## Phase 0
 
-- **Dump**: the `_dump/` folder where you drop whole files. Originals are never moved or edited.
+- **Dump**: the `_dump/` folder where you drop whole files. The tool never moves or edits an original. It deletes one only when you delete it by name in the page's Files view or with `p0 remove`.
 - **Card**: the ~3k-token text code builds from a file (name, type, title, outline, opening text, excerpts). The only part of a file sent to the API.
 - **Card note**: a markdown file with YAML frontmatter, one per file, sitting in its current group's folder in the vault.
 - **Group**: a category you define, with a name and a description (covers, excludes). Becomes one Choice option.

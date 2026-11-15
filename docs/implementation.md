@@ -31,7 +31,7 @@ How the spec in [phase0.md](phase0.md) maps to code. This is the working contrac
 - Records are `StrictModel` subclasses. Anything written to disk is validated on the way in and out.
 - Tests never call a real API. The fake backend lives in `tests/fakes.py`, never in `src/`. HTTP is mocked only inside tests (`httpx2.MockTransport` for the Jev client).
 - Tests use `tmp_path` vaults built with `vault.init_vault`. The page's script is run under node with a stand-in for the browser, in `tests/test_ui_api.py` (skipped when node is missing).
-- Originals in the dump folder are opened read-only. Nothing in `src/` writes, moves or deletes there, except the UI upload, which only adds new files (it keeps its own hidden `.p0-upload-*` file there while a body arrives and removes it again). No function renames or removes the dump folder, the folder it sits in, or a tool folder, whatever a group is called.
+- Originals in the dump folder are opened read-only. Nothing in `src/` writes, moves or deletes there, with two exceptions: the UI upload, which only adds new files (it keeps its own hidden `.p0-upload-*` file there while a body arrives and removes it again), and `vault.delete_original`, which deletes one file the user named by its exact id (the page's Files view, `p0 remove`). No function renames or removes the dump folder, the folder it sits in, or a tool folder, whatever a group is called.
 - A failure that is about the run and not about one file is a `RunStopped`: the spend cap (`BudgetExceeded`) or a call log that cannot be written (`LogFailed`). The sorter, `suggest` and the evaluation runner end the run on either.
 - Only `backends/jev.py` imports `typesafe_sdk`. Only `eval/baselines/` imports `fastembed` or `anthropic`.
 - The model version always comes from `Config.model` and is passed on every call.
@@ -227,10 +227,12 @@ class CardNote(StrictModel):
 
 def read_card_notes(root: Path) -> list[CardNote]
 def write_card_note(root: Path, placement: Placement, body: str, notes: list[CardNote] | None = None) -> Path
+def delete_original(root: Path, file_id: str) -> int                 # deletes one original and its card notes; returns how many notes
 def folder_for(root: Path, group_id: str | None) -> Path               # group name folder, or Unsorted
 def group_id_of_folder(root: Path, folder: str) -> str | None          # raises KeyError for a folder that is no current group
 ```
 
+- `delete_original` is the only code that removes an original. It takes the file by its exact id in the dump listing (never a joined path), removes a link as a link, removes the file's card notes, and removes folders inside the dump that are left empty (never the dump folder itself). Labels stay: they record what the user decided.
 - `dump_files` walks the dump folder recursively and skips any path with a component that starts with a dot. It does not follow symlinked folders. The file id is the path relative to the dump folder, with forward slashes.
 - A card note is a markdown file whose frontmatter holds a valid `Placement` once other keys are set aside. Other keys (a tag or any property added in Obsidian) are kept in `extras` and written back after the placement fields by `write_card_note` and by every rewrite in `corrections`. The body is `render_card(card)`.
 - A card note sits in its group's folder (the folder is named after the group) or in `Unsorted/`. The folder a note is under is the file's current group. `placement.group_id` is the group as of the last write or sync.
@@ -363,6 +365,8 @@ Card notes whose source file is gone from the dump are listed in `missing_source
 | `POST /api/groups` | `{name, covers, excludes}` |
 | `PATCH /api/groups/{group_id}` | any of `name`, `covers`, `excludes` |
 | `DELETE /api/groups/{group_id}` | deletes the group |
+| `GET /api/dump` | every file in the dump folder: `{dump_dir, files: [{file_id, size, modified}]}`, for the Files view |
+| `DELETE /api/dump/{file_id:path}` | deletes one original for good, with its card note (`vault.delete_original`); 404 for an id that is not a file of the dump, 409 while a sort runs |
 | `PUT /api/dump/{name}` | adds one file to the dump folder from the raw request body. The body is collected under a hidden name (`.p0-upload-<random>`), which `dump_files` skips, and linked to its own name with `os.link` once it is whole. Never overwrites (409) and never accepts a path; a body cut short answers 400 and leaves nothing |
 | `POST /api/suggest` | runs `suggest` and returns `{suggestions: [...], failed: {file_id: reason}}` (served and tested; the page has no control for it yet) |
 
@@ -376,7 +380,7 @@ Safety of the server:
 - The page loads nothing from anywhere else. FastAPI's docs routes are off (they load from a CDN). The page, the static files and originals are sent with `Cache-Control: no-cache`.
 - `p0 ui` binds the socket itself before it opens the browser, so the first load is never refused and a taken port is a plain `error:` line.
 
-The page: the Unsorted column first, then one column per group, a card per file. Drag a card to another column to move it (which freezes it). A card shows the file name, type, the top probability, and marks for close call, frozen, and moved by you. Clicking a card opens a side panel with every group's probability, `fits_any`, the reason when Unsorted, the card text, and buttons to freeze, unfreeze or open the original. The header has the vault name, set version, model, spend, a Sort button with progress, and Add group. Dropping files from the desktop onto the page adds them to the dump. Group descriptions are edited in place. What a sort could not do (the reason it stopped, or every file that was not sorted with its reason) and dropped files that were not added stay in a list above the lanes until dismissed. Sort is disabled while dropped files are on their way. A second press on Sort, on the form's save or on delete is ignored while the first is not answered, and when the server refuses one of them the board is loaded again. When the open file can no longer be read, the panel closes with a message. Minimal look: system fonts, plenty of white space, one accent color, light and dark from the system setting, keyboard reachable.
+The page: the Unsorted column first, then one column per group, a card per file. Drag a card to another column to move it (which freezes it). A card shows the file name, type, the top probability, and marks for close call, frozen, and moved by you. Clicking a card opens a side panel with every group's probability, `fits_any`, the reason when Unsorted, the card text, and buttons to freeze, unfreeze or open the original. The header has the vault name, set version, model, spend, a Sort button with progress, and Add group. Dropping files from the desktop onto the page adds them to the dump. Group descriptions are edited in place. A Board and Files switch in the header shows either the lanes or the Files view: the dump folder as a tree of folders (each can be folded), every file with its size and where it is sorted (a group, Unsorted, or not sorted yet), and Show card, Open and Delete. Delete asks first, with Keep focused, and then removes the file for good. Add files opens the system's file picker; dropping files on the page does the same. What a sort could not do (the reason it stopped, or every file that was not sorted with its reason) and dropped files that were not added stay in a list above the lanes until dismissed. Sort is disabled while dropped files are on their way. A second press on Sort, on the form's save or on delete is ignored while the first is not answered, and when the server refuses one of them the board is loaded again. When the open file can no longer be read, the panel closes with a message. Minimal look: system fonts, plenty of white space, one accent color, light and dark from the system setting, keyboard reachable.
 
 ## Evaluation (`eval/`)
 

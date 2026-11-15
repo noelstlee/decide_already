@@ -4,6 +4,7 @@ Newest first. "Decided" means Stan made the call; "Proposed" means it is in a bl
 
 | Date | Decision | Status | Why |
 | --- | --- | --- | --- |
+| 2026-11-15 | The page gets a Files view of the dump folder, and you can delete an original there (or with `p0 remove`). The file is deleted for good, with its card note; labels stay. This is the one exception to "never delete the user's original files" | Decided (Stan) | Stan asked for it: managing the dump from the page, and a delete that really deletes. A delete asks first, takes a file by its exact id only, and is refused while a sort runs |
 | 2026-11-15 | Phase 0 gets a minimal local web UI (`p0 ui`): FastAPI and uvicorn serving one plain HTML, CSS and JS page over the same functions as the CLI | Decided | Stan wants to see the loop in a UI and judge the UX; the CLI and Obsidian stay |
 | 2026-11-15 | The smoke test runs on 10 synthetic course files of mixed types, not personal files. `smoke_test/mock_data` (real CS 4641 material) is not sent anywhere | Decided | Small, safe to send, exercises every extractor; course material still needs the instructor's OK |
 | 2026-11-15 | Public evaluation set: MIT OCW 6.867 (CC BY-NC-SA) plus the MIT 6.S191 lab files (MIT license). Five groups: Lecture notes, Homework, Exams, Projects, Logistics | Decided | Stan delegated the dataset and the groups; 6.867 has no code, the labs add notebooks and Python |

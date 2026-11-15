@@ -64,6 +64,8 @@ Then follow the walkthrough on the page:
 
 New files come in with Add files (a file picker), by dropping them on the page, or by copying them into the vault's `_dump/` folder. Then press Sort.
 
+The Files switch in the header shows the dump folder as a tree: every file, its size, and where it is sorted. Delete there removes the file from the vault for good, with its card note, after you confirm. `p0 remove <file id>` does the same from the command line.
+
 A full smoke run costs well under one cent. Every correction is one line in `sandbox/try/.decide/labels.jsonl`.
 
 ### The same from the command line
@@ -141,7 +143,7 @@ No reasoning LLM sits in the sorting path; one appears only as a baseline. Phase
 
 ## How it works
 
-The loop: **dump folder** (whole files, never moved or edited) → **card builder** (code: extracts text, about 3k tokens per file, no LLM) → **Jev**, one request per file (a Choice over your groups plus a yes/no "does any group fit?", every call logged) → **board** (your groups with probabilities, Unsorted when no group fits well, close calls flagged) → **you** (add or edit a group, move a file, which freezes it, freeze or unfreeze) → **rerun** (unfrozen files only, against the full current group set). Every move and freeze is written to the labels file, which scores the sort and seeds D1 in Phase 1.
+The loop: **dump folder** (whole files, never moved or edited by the tool; you can delete one yourself) → **card builder** (code: extracts text, about 3k tokens per file, no LLM) → **Jev**, one request per file (a Choice over your groups plus a yes/no "does any group fit?", every call logged) → **board** (your groups with probabilities, Unsorted when no group fits well, close calls flagged) → **you** (add or edit a group, move a file, which freezes it, freeze or unfreeze) → **rerun** (unfrozen files only, against the full current group set). Every move and freeze is written to the labels file, which scores the sort and seeds D1 in Phase 1.
 
 A frozen file never goes back to Jev unless you unfreeze it or its content changes. A rerun sends only unfrozen files, scored against the full current set of groups.
 
@@ -244,6 +246,7 @@ Commands come first; Obsidian (or Finder) is the board, and `p0 ui` opens a mini
 | Freeze | `p0 freeze <file or group>` (or set `frozen: true` in the card note) | Jev won't re-sort it | A confirmation: Jev's pick accepted |
 | Unfreeze | `p0 unfreeze <file or group>` | Back in the next rerun | The unfreeze |
 | Check frozen files | `p0 suggest` | Lists frozen files Jev would now place elsewhere; nothing moves | Suggestions, kept apart from labels |
+| Delete a file from the dump | `p0 remove <file id>`, or Delete in the page's Files view | The original and its card note are deleted for good, after a yes | Nothing new; earlier labels stay |
 | Pick up edits made in Obsidian | `p0 sync` | Reads moved notes, frontmatter edits and group-note edits | Moves and freezes as labels; group edits as a new set |
 | See the board | `p0 board` | Groups, Unsorted and close calls, with probabilities | Nothing |
 
@@ -255,7 +258,7 @@ Everything lives in one folder on your machine that Obsidian can open as a vault
 
 ```text
 my-vault/
-  _dump/                     drop files here; originals are never moved or edited
+  _dump/                     drop files here; the tool never moves or edits them
   _groups/
     HW.md                    one note per group: frontmatter covers, excludes
     Logistics.md
