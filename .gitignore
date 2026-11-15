@@ -40,3 +40,6 @@ htmlcov/
 
 # smoke test
 smoke_test/
+
+# Agents file
+AGENTS.md
