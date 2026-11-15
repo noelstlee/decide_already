@@ -7,10 +7,14 @@ authors = [
 ]
 requires-python = ">=3.11"
 dependencies = [
+    "fastapi>=0.163.0",
     "pydantic>=2.12",
+    "pymupdf>=2.1",
+    "python-pptx>=1.0.2",
     "pyyaml>=6.0.3",
     "typer>=0.27.3",
     "typesafe-sdk==0.7.5",
+    "uvicorn>=0.54.0",
 ]
 
 [project.scripts]
@@ -22,9 +26,17 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "httpx>=0.28.1",
     "pytest>=9.1.1",
     "ruff>=0.17.2",
 ]
+eval = [
+    "anthropic>=2.8.0",
+    "fastembed>=0.9.1",
+]
+
+[tool.uv]
+default-groups = ["dev", "eval"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
