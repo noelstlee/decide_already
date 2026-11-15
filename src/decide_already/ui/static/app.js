@@ -318,6 +318,7 @@ function renderHeader() {
     ? `Adding ${plural(state.adding, "file")}`
     : plural(waiting, "new file");
   $("add-group").disabled = !board || sorting();
+  $("add-files").disabled = !board; // uploads are fine during a sort: it does not see them
   renderSortButton();
 }
 
@@ -1246,6 +1247,18 @@ function watchFileDrops() {
   });
 }
 
+// Listen for the Add files button: it opens the system's file picker, and the files picked
+// are added the same way as dropped ones. The picker offers files only, never folders.
+function watchFilePicker() {
+  const picker = $("file-picker");
+  $("add-files").addEventListener("click", () => picker.click());
+  picker.addEventListener("change", () => {
+    const files = Array.from(picker.files || []);
+    picker.value = ""; // so that picking the same file again still counts as a change
+    if (files.length > 0) addFiles({ files, folders: 0 });
+  });
+}
+
 // The files in a drop. They are read at once: the browser takes a drop's content away again
 // when the event is over. Folders cannot be sent as files, so they are only counted.
 function droppedFiles(transfer) {
@@ -1329,6 +1342,7 @@ function start() {
   watchPresses();
   watchCardDrags();
   watchFileDrops();
+  watchFilePicker();
   render();
   load();
 }

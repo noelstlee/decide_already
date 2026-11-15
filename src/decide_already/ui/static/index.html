@@ -27,6 +27,17 @@
       </div>
       <div class="top-actions">
         <span id="pending" class="pending" hidden></span>
+        <button
+          id="add-files"
+          type="button"
+          class="button"
+          data-key="add-files"
+          title="Pick files to copy into the dump folder. You can also drop files on the page."
+          disabled
+        >
+          Add files
+        </button>
+        <input id="file-picker" type="file" multiple hidden>
         <button id="add-group" type="button" class="button" data-key="add-group" disabled>
           Add group
         </button>

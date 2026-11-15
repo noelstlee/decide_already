@@ -1530,6 +1530,11 @@ const browser = (() => {
     }
     setSelectionRange() {}
     scrollIntoView() {}
+    // A click from code, as the page gives the hidden file picker. The test counts them.
+    click() {
+      this.clicks = (this.clicks || 0) + 1;
+      for (const listener of this.listeners.click || []) listener({ target: this });
+    }
     // Only the selectors the page uses: .class, [attribute] and [attribute="value"].
     matches(selector) {
       if (selector.startsWith(".")) return this.classes().includes(selector.slice(1));
@@ -2067,6 +2072,39 @@ def test_page_holds_sort_back_while_files_arrive_and_lists_the_ones_not_added():
             "Added 1 file to the dump folder. Press Sort to place it.",
             "2 files were not added. The list is above the board.",
         ],
+    }
+
+
+@needs_node
+def test_page_adds_the_files_picked_with_the_add_files_button():
+    """Add files opens the picker; the files picked go to the dump like dropped ones."""
+    result = run_page(
+        """
+        const picked = (name) => Object.assign(new Blob(["x"]), { name });
+        browser.routes["PUT /api/dump/a.txt"] = () => ({ status: 201, body: {} });
+        browser.routes["PUT /api/dump/b.pdf"] = () => ({ status: 201, body: {} });
+        const picker = document.getElementById("file-picker");
+        const enabled = !browser.find("add-files").disabled;
+        browser.press("add-files");
+        picker.files = ["a.txt", "b.pdf"].map(picked);
+        picker.value = "C:\\fakepath\\a.txt";
+        for (const listener of picker.listeners.change) listener({ target: picker });
+        await browser.settle();
+        browser.done({
+          enabled,
+          opened: picker.clicks,
+          sent: browser.calls.filter(([name]) => name.startsWith("PUT")).map(([name]) => name),
+          cleared: picker.value,
+          toasts: browser.toasts(),
+        });
+        """
+    )
+    assert result == {
+        "enabled": True,
+        "opened": 1,
+        "sent": ["PUT /api/dump/a.txt", "PUT /api/dump/b.pdf"],
+        "cleared": "",
+        "toasts": ["Added 2 files to the dump folder. Press Sort to place them."],
     }
 
 
