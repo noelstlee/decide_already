@@ -14,6 +14,11 @@ _SET_FILE = re.compile(r"v(\d+)\.yaml")
 
 
 def init_vault(root: Path, dump_dir: str = DEFAULT_DUMP_DIR) -> Config:
+    """Set up a folder as a vault: create _groups/, Unsorted/ and .decide/, and write the config.
+
+    If the folder is already a vault, return its existing config and change nothing.
+    A custom dump folder must already exist; only the default _dump/ is created for you.
+    """
     root = root.resolve()
     if Config.path(root).exists():
         return Config.load(root)
@@ -31,6 +36,7 @@ def init_vault(root: Path, dump_dir: str = DEFAULT_DUMP_DIR) -> Config:
 
 
 def find_vault(start: Path) -> Path:
+    """Walk up from a folder until one with .decide/config.yaml is found, and return it."""
     for candidate in [start.resolve(), *start.resolve().parents]:
         if Config.path(candidate).exists():
             return candidate
@@ -38,6 +44,7 @@ def find_vault(start: Path) -> Path:
 
 
 def read_note(path: Path) -> tuple[dict, str]:
+    """Split a markdown note into its YAML frontmatter (as a dict) and the body text below it."""
     text = path.read_text()
     match = _FRONTMATTER.match(text)
     if not match:
@@ -47,19 +54,23 @@ def read_note(path: Path) -> tuple[dict, str]:
 
 
 def write_note(path: Path, frontmatter: dict, body: str = "") -> None:
+    """Write a markdown note: the frontmatter between --- lines, then the body."""
     front = yaml.safe_dump(frontmatter, sort_keys=False, allow_unicode=True)
     path.write_text(f"---\n{front}---\n{body}")
 
 
 def slugify(name: str) -> str:
+    """Turn a group name into its id: lowercase, with dashes. "Lecture slides" gives "lecture-slides"."""
     return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "group"
 
 
 def _group_note(root: Path, name: str) -> Path:
+    """Path of a group's note: _groups/<name>.md."""
     return root / GROUPS_DIR / f"{name}.md"
 
 
 def _check_name(root: Path, name: str) -> None:
+    """Reject group names that are empty, padded, hidden, contain slashes, or clash with a tool folder."""
     config = Config.load(root)
     reserved = {GROUPS_DIR, UNSORTED_DIR, DECIDE_DIR, config.dump_dir}
     if not name.strip() or name != name.strip():
@@ -69,11 +80,17 @@ def _check_name(root: Path, name: str) -> None:
 
 
 def _clean(text: str | None) -> str | None:
+    """Strip a string; return None if nothing is left."""
     text = (text or "").strip()
     return text or None
 
 
 def read_groups(root: Path) -> list[Group]:
+    """Read every note in _groups/ into a Group, sorted by id.
+
+    The file name is the group name. A note without covers is an error.
+    A hand-made note without an id gets one written back into it.
+    """
     groups: list[Group] = []
     for path in sorted((root / GROUPS_DIR).glob("*.md")):
         frontmatter, body = read_note(path)
@@ -100,10 +117,12 @@ def read_groups(root: Path) -> list[Group]:
 
 
 def _set_path(root: Path, version: int) -> Path:
+    """Path of one set version file: .decide/sets/v<version>.yaml."""
     return root / DECIDE_DIR / SETS_DIR / f"v{version}.yaml"
 
 
 def latest_set(root: Path) -> GroupSet | None:
+    """Load the highest-numbered set version, or None if no set has been written yet."""
     versions = []
     for path in (root / DECIDE_DIR / SETS_DIR).glob("v*.yaml"):
         match = _SET_FILE.fullmatch(path.name)
@@ -127,6 +146,7 @@ def sync_group_set(root: Path) -> GroupSet:
 
 
 def add_group(root: Path, name: str, covers: str, excludes: str | None = None) -> GroupSet:
+    """Create a group: write its note, make its folder, and record a new set version."""
     _check_name(root, name)
     if _clean(covers) is None:
         raise ValueError("every group needs a covers description")
@@ -147,6 +167,10 @@ def add_group(root: Path, name: str, covers: str, excludes: str | None = None) -
 def edit_group(
     root: Path, name: str, covers: str | None = None, excludes: str | None = None
 ) -> GroupSet:
+    """Change a group's covers and/or excludes text. An empty excludes removes it.
+
+    Arguments left as None are not touched. Bumps the set version only if something changed.
+    """
     note = _group_note(root, name)
     if not note.exists():
         raise FileNotFoundError(f"no group named {name!r}")
@@ -165,6 +189,7 @@ def edit_group(
 
 
 def rename_group(root: Path, old: str, new: str) -> GroupSet:
+    """Rename a group's note and folder. The id stays the same, so the group keeps its history."""
     _check_name(root, new)
     note = _group_note(root, old)
     if not note.exists():
@@ -179,6 +204,7 @@ def rename_group(root: Path, old: str, new: str) -> GroupSet:
 
 
 def delete_group(root: Path, name: str) -> GroupSet:
+    """Delete a group's note, and its folder if empty, then record a new set version."""
     note = _group_note(root, name)
     if not note.exists():
         raise FileNotFoundError(f"no group named {name!r}")

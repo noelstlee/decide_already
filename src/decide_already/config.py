@@ -21,9 +21,9 @@ class Config(BaseModel):
     dump_dir: str = DEFAULT_DUMP_DIR
     variant: str = "card"
     card_token_budget: int = 3000
-    unsorted_fits_any_below: float = 0.5
-    unsorted_top_below: float = 0.6
-    close_call_margin: float = 0.15
+    unsorted_fits_any_below: float = 0.5  # fits_any under this: Unsorted
+    unsorted_top_below: float = 0.6  # top group's probability under this: Unsorted
+    close_call_margin: float = 0.15  # top two groups closer than this: placed, but flagged
 
     @staticmethod
     def path(vault: Path) -> Path:

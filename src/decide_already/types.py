@@ -16,6 +16,12 @@ class Group(BaseModel):
 
 
 class GroupSet(BaseModel):
+    """
+    full list of groups at one moment, plus a verion number.
+    Every add, edit, rename or delete writes a new version file.
+    Jev's prob only compare fairly under the same optoins,
+    so each result records which version it ran under.
+    """
     model_config = ConfigDict(extra="forbid")
 
     version: int  # bumps on any add, rename, edit or delete
@@ -33,7 +39,10 @@ UnsortedReason = Literal["no_group_fits", "weak_top", "no_text"]
 
 
 class Placement(BaseModel):
-    """Stored in a card note's frontmatter."""
+    """
+    Stored in a card note's frontmatter.
+    The result of sorting. 
+    """
 
     file_id: str
     content_hash: str
