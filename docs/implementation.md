@@ -181,7 +181,8 @@ class Decision(StrictModel):
     reason: UnsortedReason | None
 
 def decide(probs: dict[str, float], fits_any: float, config: Config) -> Decision
-def judge(card: Card, groups: list[Group], set_version: int, backend: Backend, variant: str) -> SortResult
+def judge(card: Card, groups: list[Group], set_version: int, backend: Backend, variant: str,
+          per_state: list[SortResult] | None = None) -> SortResult
 ```
 
 | `fits_any` | top probability | top minus second | Outcome |
@@ -191,7 +192,9 @@ def judge(card: Card, groups: list[Group], set_version: int, backend: Backend, v
 | at or over | at or over | under `close_call_margin` | placed in the top group, `close_call` true |
 | at or over | at or over | at or over | placed in the top group |
 
-With one group, the second probability counts as 0. Ties go to the lower group id. A value exactly at a cutoff counts as at or over. `judge` sends one request per state and averages `probs` and `fits_any` when there are several (window vote); tokens and latency are summed, and stay `None` when the backend reports none (the fake does not).
+With one group, the second probability counts as 0. Ties go to the lower group id. A value exactly at a cutoff counts as at or over. `judge` sends one request per state and averages `probs` and `fits_any` when there are several (window vote); tokens and latency are summed, and stay `None` when the backend reports none (the fake does not). When `per_state` is a list, each state's own answer is appended to it (the evaluation reads the window votes from it). A group missing from one state's answer counts as 0 for that state, and a card with no states raises `ValueError`.
+
+With the default cutoffs the third row can never apply when the probabilities sum to 1: a top probability of 0.6 or more leaves at most 0.4 for the second, a gap of at least 0.2, and the margin is 0.15. The close call flag only becomes live when `unsorted_top_below` is under 0.575 or the margin is raised. The defaults are Stan's call (see docs/decisions.md, still open).
 
 Code alone handles two cases: a card with no states goes to Unsorted with reason `no_text`, `placed_by: code`, no model asked. A `BackendError` is never an answer: the file keeps its previous note, if any, and is reported.
 
@@ -209,16 +212,19 @@ class CardNote(StrictModel):
     body: str
 
 def read_card_notes(root: Path) -> list[CardNote]
-def write_card_note(root: Path, placement: Placement, body: str) -> Path
+def write_card_note(root: Path, placement: Placement, body: str, notes: list[CardNote] | None = None) -> Path
 def folder_for(root: Path, group_id: str | None) -> Path               # group name folder, or Unsorted
 def group_id_of_folder(root: Path, folder: str) -> str | None          # raises KeyError for a folder that is no current group
 ```
 
-- `dump_files` walks the dump folder recursively and skips any path with a component that starts with a dot. The file id is the path relative to the dump folder, with forward slashes.
+- `dump_files` walks the dump folder recursively and skips any path with a component that starts with a dot. It does not follow symlinked folders. The file id is the path relative to the dump folder, with forward slashes.
 - A card note is a markdown file whose frontmatter is exactly a `Placement`, in the field order of the model. The body is `render_card(card)`.
 - A card note sits in its group's folder (the folder is named after the group) or in `Unsorted/`. The folder a note sits in is the file's current group. `placement.group_id` is the group as of the last write or sync.
-- `read_card_notes` looks in every top-level folder except the dump folder, `_groups`, `.decide` and hidden folders. Markdown files whose frontmatter is not a `Placement` are the user's own notes and are ignored.
-- `write_card_note` writes into the folder of `placement.group_id` and removes any other card note for the same file id.
+- `read_card_notes` looks at the markdown files directly inside every top-level folder except the dump folder, `_groups`, `.decide` and hidden folders (nested folders are not read). Markdown files whose frontmatter is not a `Placement` are the user's own notes and are ignored. That includes a card note that gained an extra frontmatter key by hand: its file then shows as new, and the next sort reports it instead of overwriting it.
+- `write_card_note` writes into the folder of `placement.group_id` and removes any other card note for the same file id. It never overwrites a file that is not that file's card note: that raises `FileExistsError`. Paths are compared with `samefile`, so a group folder that differs only in case is handled on a Mac. `notes` is what `read_card_notes` just returned; a caller that writes many notes in a row passes it so the vault is read once, not once per write.
+- Two file ids that flatten to the same note name (`a/b.txt` and `a__b.txt`) cannot both have a note. The second is reported as an error on every sort.
+- Group folders follow group names. `rename_group` and `sync_group_set` (for a group note renamed by hand, which keeps its id) both move the folder through `_move_folder`. When a folder with the new name is already there, the files are moved into it one by one, and nothing is ever written over (`FileExistsError`). Two groups that swap names by hand keep their folders.
+- Notes are read with PyYAML's C loader when it is available: every command reads every card note, and the C loader is about four times faster.
 
 ## Sort (`sort.py`)
 
@@ -240,7 +246,11 @@ def sort_vault(root: Path, backend: Backend, on_progress: Callable[[int, int], N
 2. Read the current set (`vault.sync_group_set`). No groups is an error with a clear message.
 3. For each dump file: hash it. A frozen note with the same hash is skipped. A frozen note whose hash changed is unfrozen first (label `unfrozen`) and then sorted like any other.
 4. Every other file is carded with `config.variant`, judged, decided, and written as a card note with `placed_by: jev`.
-5. `BudgetExceeded` stops the run. Files not reached are listed in `errors`.
+5. `BudgetExceeded` stops the run. The file that hit the cap is listed in `errors` with the backend's message, and every later file with a fixed one.
+
+`asked` counts the files sent to the model, answered or failed with a `BackendError`. It leaves out files with no text and files the spend cap stopped. An `OSError` for one file (the original cannot be read, or its note cannot be written) is listed in `errors` and the run goes on. A sort reads the card notes twice: once in `sync`, once for itself. `p0 sort` exits 1 when `errors` is not empty, after printing the summary line.
+
+`sort.py` imports `corrections` inside `sort_vault`, because `corrections` imports `judge` and `decide` from `sort`.
 
 ## Board (`board.py`)
 
@@ -272,16 +282,19 @@ class Board(StrictModel):
 def build_board(root: Path) -> Board
 ```
 
-Files are grouped by the folder they sit in. Within a group: close calls first, then by name.
+Files are grouped by the folder they sit in, so `BoardFile.group_id` is the folder's group and not `placement.group_id` (the two differ for a note that was dragged and not synced yet). A note in a folder that is no current group is listed under Unsorted with `group_id` `None`. Within a group: close calls first, then by name (case ignored, ties by file id). `build_board` calls `vault.sync_group_set`, so group notes edited by hand become a new set version, as with `p0 group list`.
 
 ## Corrections (`corrections.py`)
 
 ```python
-def sync(root: Path) -> SyncReport            # moved, confirmed, unfrozen, orphaned, missing_sources: lists of file ids
+def sync(root: Path) -> SyncReport            # moved, confirmed, unfrozen, orphaned, missing_sources: lists of file ids; set_version
 def move_file(root: Path, file_ref: str, group_ref: str | None) -> Placement
 def freeze(root: Path, ref: str) -> list[str]     # ref is a file or a group; returns the file ids it froze
 def unfreeze(root: Path, ref: str) -> list[str]
-def suggest(root: Path, backend: Backend) -> list[Suggestion]
+def suggest(root: Path, backend: Backend, failed: dict[str, str] | None = None) -> list[Suggestion]
+def read_labels(root: Path) -> list[Label]
+def active_labels(root: Path) -> dict[str, Label]     # by file id
+def unfreeze_note(root: Path, note: CardNote, set_version: int) -> Placement   # used by sort_vault
 ```
 
 A file reference is a file id, or a file name that is unique in the vault. A group reference is a group id or name; `None` or `Unsorted` means Unsorted.
@@ -293,22 +306,24 @@ A file reference is a file id, or a file name that is unique in the vault. A gro
 | `unfreeze` | `frozen: false` | `unfrozen` |
 | `suggest` | nothing moves | none; one line per differing file in `.decide/suggestions.jsonl` |
 
-Labels record `jev_probs` and `jev_set_version` from the note as it was, and `set_version` as the current set version. A file's active label is its last line in `labels.jsonl` when that line is `moved` or `confirmed`.
+Labels record `jev_probs` and `jev_set_version` from the note as it was, and `set_version` as the current set version. `jev_set_version` is null when the note has no `probs` (no model was asked). A file's active label is its last line in `labels.jsonl` when that line is `moved` or `confirmed`.
+
+`move_file`, `freeze`, `unfreeze` and `suggest` each call `sync` first, so an action always sees hand edits, and a drag by hand plus a command gives the same labels as two commands. Inside an action the card note is written first and the label second: a note that cannot be written leaves no label, and a lost label is repaired by the next sync. In `freeze` and `unfreeze` a reference that names a group wins over a file of the same name. When a file has several card notes (one was copied by hand), the last one by path counts.
 
 `sync` picks up edits made by hand, in this order per card note:
 
-1. The note sits in a folder that is neither a current group nor `Unsorted` (its group was deleted): move it to `Unsorted/`, `group_id: null`, `placed_by: code`, `frozen: false`. If it had an active label, write `unfrozen`.
-2. The folder's group differs from `placement.group_id` (a drag): write `moved`, then update the note as `move_file` does.
+1. The note sits in a folder that is neither a current group nor `Unsorted` (its group was deleted): move it to `Unsorted/`, `group_id: null`, `placed_by: code`, `frozen: false`, `close_call: false`. If it had an active label, write `unfrozen` (from the old group to null).
+2. The folder's group differs from `placement.group_id` (a drag): update the note as `move_file` does, then write `moved`.
 3. `frozen` is true and the file has no active label (set by hand): write `confirmed`.
 4. `frozen` is false and the file has an active label (cleared by hand): write `unfrozen`.
 
-Card notes whose source file is gone from the dump are listed in `missing_sources` and left alone. `sync` also calls `vault.sync_group_set`, so edits to group notes become a new set version.
+Card notes whose source file is gone from the dump are listed in `missing_sources` and left alone: no rule is applied to them, even when they were dragged or frozen by hand. `sync` first calls `vault.sync_group_set`, so edits to group notes become a new set version, and a group note renamed by hand takes its folder along (it is a rename, not a delete, so rule 1 does not fire). A file is in at most one of the report's lists. `sync` raises `FileExistsError` when a file of the user's sits where a card note has to go, which stops the whole sync (and the sort or board that called it) with a message that names the file.
 
-`suggest` asks the backend about every frozen file, runs `decide`, and reports the files whose decision differs from their current group.
+`suggest` asks the backend about every frozen file, runs `decide`, and reports the files whose decision differs from their current group. A failure is not an answer, so it is not agreement either: when `failed` is a dict, each file the model could not be asked about is added to it with the reason.
 
 ## CLI (`cli.py`)
 
-`p0 init`, `p0 group add|edit|rename|delete|list` (step 1), `p0 sort`, `p0 board` (step 4), `p0 move <file> <group>`, `p0 freeze <file or group>`, `p0 unfreeze <file or group>`, `p0 suggest`, `p0 sync` (step 5), `p0 ui [--port 8765] [--no-open]` (UI). Every command takes `--vault`. Commands print short plain lines and exit 1 with `error: ...` on a known failure.
+`p0 init`, `p0 group add|edit|rename|delete|list` (step 1), `p0 sort`, `p0 board` (step 4), `p0 move <file> <group>`, `p0 freeze <file or group>`, `p0 unfreeze <file or group>`, `p0 suggest`, `p0 sync` (step 5), `p0 ui [--port 8765] [--no-open]` (UI). Every command takes `--vault`. Commands print short plain lines and exit 1 with `error: ...` on a known failure. `p0 sort` and `p0 suggest` also exit 1 when a file could not be sorted or asked about, after the summary line and one `error: <file id>: <message>` line per file.
 
 ## UI (`ui/`)
 
@@ -317,22 +332,30 @@ Card notes whose source file is gone from the dump are listed in `missing_source
 | Method and path | Does |
 | --- | --- |
 | `GET /` | the page |
-| `GET /api/board` | runs `sync`, then returns the board plus vault info: path, dump folder, model, set version, spend and cap |
-| `GET /api/files/{file_id:path}` | one file: its placement, probabilities by group, and the card text |
-| `GET /api/original/{file_id:path}` | the original file, read-only |
+| `GET /api/board` | runs `sync` (skipped while a sort runs), then returns the board plus `sorting` and vault info: name, path, dump folder, model, spend and cap, and the three cutoffs |
+| `GET /api/files/{file_id:path}` | one file: `{file_id, group_id (by folder), placement, probs: [{group_id, name, prob}] highest first, card}`; 404 for a file with no card note yet |
+| `GET /api/original/{file_id:path}` | the original file, read-only. PDFs and pictures open inline, any other text file is sent as `text/plain` with `nosniff` (a web page from the dump must never run inside the app), other binaries download |
 | `POST /api/sort` | starts a sort in the background; 409 if one is running |
 | `GET /api/sort/status` | `{running, done, total, report, error}` for the progress bar |
 | `POST /api/move` | `{file_id, group_id}`; `group_id: null` is Unsorted |
-| `POST /api/freeze`, `POST /api/unfreeze` | `{ref}`: a file id or a group id |
+| `POST /api/freeze`, `POST /api/unfreeze` | `{ref}`: a file id, a group id, or `Unsorted` |
 | `POST /api/groups` | `{name, covers, excludes}` |
 | `PATCH /api/groups/{group_id}` | any of `name`, `covers`, `excludes` |
 | `DELETE /api/groups/{group_id}` | deletes the group |
 | `PUT /api/dump/{name}` | adds one file to the dump folder from the raw request body; never overwrites (409) and never accepts a path |
-| `POST /api/suggest` | runs `suggest` and returns the list |
+| `POST /api/suggest` | runs `suggest` and returns `{suggestions: [...], failed: {file_id: reason}}` (served and tested; the page has no control for it yet) |
 
-Errors come back as `{"detail": "..."}` with a 4xx status. File ids are checked against `dump_files`, so no request can reach outside the vault.
+Errors come back as `{"detail": "..."}`: 400 bad input, 403 a request from another site, 404 unknown id, 409 conflict (a sort is running, a name is taken, a file exists, the backend cannot be built), 500 for other OS errors. File ids are checked against `dump_files` and never joined to a path, so no request can reach outside the vault.
 
-The page: one column per group plus Unsorted, a card per file. Drag a card to another column to move it (which freezes it). A card shows the file name, type, the top probability, and marks for close call, frozen, and moved by you. Clicking a card opens a side panel with every group's probability, `fits_any`, the reason when Unsorted, the card text, and buttons to freeze, unfreeze or open the original. The header has the vault name, set version, model, spend, a Sort button with progress, and Add group. Dropping files from the desktop onto the page adds them to the dump. Group descriptions are edited in place. Minimal look: system fonts, plenty of white space, one accent color, light and dark from the system setting, keyboard reachable.
+Safety of the server:
+
+- Every request passes `_local_only`: the Host header must be `127.0.0.1` or `localhost`, and an Origin header must match the Host. Without it any website open in the same browser could read originals or start a paid sort. Tests therefore build the client as `TestClient(app, base_url="http://127.0.0.1:8765")`.
+- One lock serializes vault access. The sort runs on a background thread. While it runs, every change (move, freeze, unfreeze, group add, edit and delete, suggest) answers 409, because the sort read the card notes at its start and would write over the change. Uploads, file detail and originals still work.
+- The real backend is built only when a sort or a suggest starts, and closed after, so the page opens without an API key.
+- The page is sent with `Content-Security-Policy: default-src 'self'` and loads nothing from anywhere else. FastAPI's docs routes are off (they load from a CDN). Static files are sent with `Cache-Control: no-cache`.
+- `p0 ui` binds the socket itself before it opens the browser, so the first load is never refused and a taken port is a plain `error:` line.
+
+The page: the Unsorted column first, then one column per group, a card per file. Drag a card to another column to move it (which freezes it). A card shows the file name, type, the top probability, and marks for close call, frozen, and moved by you. Clicking a card opens a side panel with every group's probability, `fits_any`, the reason when Unsorted, the card text, and buttons to freeze, unfreeze or open the original. The header has the vault name, set version, model, spend, a Sort button with progress, and Add group. Dropping files from the desktop onto the page adds them to the dump. Group descriptions are edited in place. Minimal look: system fonts, plenty of white space, one accent color, light and dark from the system setting, keyboard reachable.
 
 ## Evaluation (`eval/`)
 
@@ -358,7 +381,15 @@ Baselines (`eval/baselines/`), each a `Backend`:
 
 Metrics (`eval/metrics.py`): `Prediction`, `Cutoffs`, `summarize`, `outcome`, `tune_cutoffs`. Reported: top-1 accuracy overall and per group, macro-F1, accuracy among placed files, share Unsorted and how many of those had the right top group, expected calibration error of the top probability, cost (input and, where billed, output tokens) and latency per file. Top-1 ignores the cutoffs. `outcome` is the same truth table as `sort.decide`, written separately, and a test checks that the two agree. `tune_cutoffs` grid-searches the two Unsorted cutoffs to maximize right placements minus wrong placements; the defaults win ties.
 
-Runner (`eval/run.py`, run as `python -m decide_already.eval.run`): runs every configuration (Jev with each of the five variants, plus each baseline on the card) over the dataset, caches every prediction in `sandbox/eval/results/` so nothing is paid for twice, tunes the two Unsorted cutoffs on the dev split, reports on the test split, and writes `metrics.json` and `report.md`. All Jev calls go through one `JevBackend` logging to `sandbox/eval/.decide/jev.jsonl`, so the spend cap covers the whole evaluation.
+Runner (`eval/run.py`, run as `python -m decide_already.eval.run [--root sandbox/eval] [--configs a,b] [--workers 6] [--limit N] [--dry-run] [--no-experiments]`): runs every configuration over the dataset, caches every prediction so nothing is paid for twice, tunes the two Unsorted cutoffs on the dev split, reports on the test split, and writes `results/metrics.json` and `results/report.md`. All Jev calls go through one `JevBackend` logging to `sandbox/eval/.decide/jev.jsonl`, so the spend cap covers the whole evaluation.
+
+- Configurations, written `backend:variant`: `jev:card`, `jev:card_no_name`, `jev:full_text`, `jev:window_vote`, `jev:names_only`, `rules:card`, `embed:card`, `embed-chunks:card` (the whole card in pieces of 1,600 characters), `llm:card`. A configuration whose backend cannot be built (no key) is pending and the report says why. With the default `--configs`, `llm:card` runs whenever `ANTHROPIC_API_KEY` is found, and it has no spend cap of its own: leave it out of `--configs` to be sure.
+- Cache: `results/predictions/<name>.jsonl` with `:` written as `_`, one line per file (`file_id, gold, split, no_text, probs, fits_any, input_tokens, output_tokens, latency_ms, model, set_version, groups_hash, error, window_tops`). A line is reused only under the same set version and the same `groups_hash` (a fingerprint of the group list), and never when it holds an error. The cache does not key on the model pin, the card format or the file content: delete the folder when one of those changes.
+- Cards are built in the main thread (PyMuPDF is not safe across threads). Jev requests run in a thread pool; the other backends run one at a time. Files with no text are recorded without asking; the file-name rules get a state with the name and path only.
+- Exit status: 0 done, 1 a problem with the arguments or the vault, 2 the spend cap stopped the run (the report is still written from what is cached).
+- `--dry-run` asks and writes nothing. It reads the last recorded set (`vault.latest_set`) because syncing the set can write.
+- A configuration is scored on the files it answered among the eligible ones. A file with an error is left out of that row, never counted as wrong, and named in the caveats; `n` is shown per row.
+- Layering: `experiments.py` (pure) <- `report.py` <- `run.py`. `run.py` hands the report an `Inputs` record made from the cache.
 
 Scoring rules:
 
@@ -367,4 +398,10 @@ Scoring rules:
 - A majority-class row (always the largest gold group) is reported for context.
 - Tuned cutoffs are reported next to the defaults, never instead of them. The dev split is small.
 
-Experiments (`eval/experiments.py`): group added mid-run (sort with `HELD_OUT_GROUP_ID` removed, then add it back and rerun the unfrozen files), and move versus description edit.
+Experiments (`eval/experiments.py`), each an extra pass of a Jev configuration under changed groups, logged under set version 0 (which no vault set ever has):
+
+1. Group added mid-run (`jev:card@without-exams`): every file is sorted with `HELD_OUT_GROUP_ID` removed. The user then adds the group, freezes each file that sits in its gold group, and reruns the rest against the full set. Reported: how many of the held-out group's files the cutoffs send to Unsorted, the other groups' accuracy, the AUROC of `fits_any` between the two, and the accuracy of the rerun.
+2. Wording of `fits_any` (`jev:names_only@without-exams`): the same pass with group names only, to show what the descriptions add when a file fits no group.
+3. Description edits (`jev:card@edit-<name>`): each entry of `<root>/description_edits.yaml` (`name`, `group_id`, `covers`, optional `excludes`, `target_file_ids`) gives one group a new description. Every file is sorted again and compared with its answer before: targets fixed, and every other file whose answer changed.
+
+Experiments 1 and 2 are computed over every file with text, dev and test together, under the default cutoffs. A pass runs only when the configuration it copies is in `--configs`.
