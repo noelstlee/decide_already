@@ -8,13 +8,30 @@ from collections.abc import Callable
 from pathlib import Path
 
 from . import vault
-from .backends.base import Backend, BackendError, BudgetExceeded, SortRequest, SortResult
+from .backends.base import (
+    Backend,
+    BackendError,
+    BudgetExceeded,
+    RunStopped,
+    SortRequest,
+    SortResult,
+)
 from .card import VARIANTS, Card, build_card, hash_file, render_card
 from .config import JEV_LOG_FILE, Config, decide_path
 from .log import total_input_tokens
 from .types import Group, GroupSet, Placement, StrictModel, UnsortedReason
 
 NOT_REACHED = "not sorted: the spend cap stopped the run before this file"
+STOPPED_BEFORE = "not sorted: the run was stopped before this file"
+NO_NOTE = (
+    "not sorted: you moved or froze this file, but its card note is gone or can no longer be "
+    "read. Put the note back, or run `p0 unfreeze` with this file's id to have it sorted "
+    "from scratch"
+)
+CHANGED_BY_HAND = (
+    "not sorted: its card note was changed by hand while the sort was running, so the note "
+    "was left as it is. The next sync picks the change up"
+)
 
 
 class Decision(StrictModel):
@@ -153,9 +170,12 @@ def sort_vault(
     Every other file is carded with the config's variant, judged, decided and written, so a
     rerun asks about every unfrozen file again, against the full current set. A file that
     cannot be read or written, or that the backend fails on, keeps its previous note (if any)
-    and is listed in the report's errors. When the spend cap is reached the run stops, and
-    that file and every file after it are listed too. `on_progress(done, total)` is called
-    after each file that was handled.
+    and is listed in the report's errors. So is a file the user labeled whose card note is
+    gone: it is not sent to the model. And so is a file whose card note was changed by hand
+    while the run was under way: that note is left as it is, for the next sync to read.
+    When the backend stops the run (the spend cap is reached, or the call log cannot be
+    written), that file and every file after it are listed too. `on_progress(done, total)`
+    is called after each file that was handled.
 
     Raises ValueError when the vault has no groups or the config names an unknown variant,
     and whatever corrections.sync raises (FileExistsError when a note cannot be moved).
@@ -175,6 +195,7 @@ def sort_vault(
         raise ValueError("there are no groups yet: add one with `p0 group add` before sorting")
     notes = vault.read_card_notes(root)
     note_of = {note.placement.file_id: note for note in notes}
+    labeled = corrections.active_labels(root)
     files = vault.dump_files(root, config)
     report = SortReport(
         set_version=group_set.version,
@@ -190,29 +211,40 @@ def sort_vault(
         note = note_of.get(file_id)
         try:
             frozen = note is not None and note.placement.frozen
-            if frozen and note.placement.content_hash == hash_file(path):
+            if note is None and file_id in labeled:
+                # The user's label stands, so the model is not asked. The user decides.
+                report.errors[file_id] = NO_NOTE
+            elif frozen and note.placement.content_hash == hash_file(path):
                 report.frozen_skipped += 1
+            elif note is not None and not vault.unchanged(note):
+                report.errors[file_id] = CHANGED_BY_HAND
             else:
                 if frozen:
                     # New content, which the freeze did not cover: the freeze comes off first.
                     corrections.unfreeze_note(root, note, group_set.version)
+                    note = vault.restamp(note)  # the tool's own rewrite is not an edit by hand
                 card = build_card(path, file_id, config)
                 placement = _place(card, group_set, backend, config)
                 if placement.placed_by == "jev":
                     report.asked += 1
-                # The notes read at the start are passed along, so that writing one note
-                # does not mean reading all of them again.
-                vault.write_card_note(root, placement, render_card(card), notes)
-                if placement.group_id is None:
-                    report.unsorted += 1
+                if note is not None and not vault.unchanged(note):
+                    # Changed while the model was asked. The answer is dropped, not the edit.
+                    report.errors[file_id] = CHANGED_BY_HAND
                 else:
-                    report.placed += 1
-                    if placement.close_call:
-                        report.close_calls += 1
-        except BudgetExceeded as error:
+                    # The notes read at the start are passed along, so that writing one
+                    # note does not mean reading all of them again.
+                    vault.write_card_note(root, placement, render_card(card), notes)
+                    if placement.group_id is None:
+                        report.unsorted += 1
+                    else:
+                        report.placed += 1
+                        if placement.close_call:
+                            report.close_calls += 1
+        except RunStopped as error:
             report.errors[file_id] = str(error)
+            later = NOT_REACHED if isinstance(error, BudgetExceeded) else STOPPED_BEFORE
             for later_id, _ in files[done:]:
-                report.errors[later_id] = NOT_REACHED
+                report.errors[later_id] = later
             break
         except BackendError as error:
             report.asked += 1  # the request went out, even though no usable answer came back

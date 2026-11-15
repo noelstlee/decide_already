@@ -47,6 +47,14 @@ def _fail(message: str) -> None:
     raise typer.Exit(code=1)
 
 
+def _vault_root(vault_path: Path | None) -> Path:
+    """Like _root, but fails when the folder has not been set up as a vault."""
+    root = _root(vault_path)
+    if not Config.path(root).exists():
+        _fail(f"no vault at {root}; run `p0 init` first")
+    return root
+
+
 def _report(action: str, result) -> None:
     """Print what a group command did, with the set version it left behind."""
     typer.echo(f"{action}. Set version {result.version} ({len(result.groups)} groups).")
@@ -65,7 +73,7 @@ def init(
     """Create the vault layout: the dump folder, _groups/, Unsorted/ and .decide/."""
     try:
         config = vault.init_vault(path, dump)
-    except FileNotFoundError as error:
+    except (ValueError, OSError) as error:
         _fail(str(error))
     typer.echo(f"Vault ready at {path.resolve()} (dump: {config.dump_dir}, model: {config.model}).")
 
@@ -78,9 +86,10 @@ def group_add(
     vault_path: VaultOption = None,
 ) -> None:
     """Add a group. Nothing moves until the next sort."""
+    root = _vault_root(vault_path)
     try:
-        result = vault.add_group(_root(vault_path), name, covers, excludes)
-    except (ValueError, FileExistsError) as error:
+        result = vault.add_group(root, name, covers, excludes)
+    except (ValueError, OSError) as error:
         _fail(str(error))
     _report(f"Added {name!r}", result)
 
@@ -97,9 +106,10 @@ def group_edit(
     """Change a group's description."""
     if covers is None and excludes is None:
         _fail("pass --covers and/or --excludes")
+    root = _vault_root(vault_path)
     try:
-        result = vault.edit_group(_root(vault_path), name, covers, excludes)
-    except (ValueError, FileNotFoundError) as error:
+        result = vault.edit_group(root, name, covers, excludes)
+    except (ValueError, OSError) as error:
         _fail(str(error))
     _report(f"Edited {name!r}", result)
 
@@ -107,9 +117,10 @@ def group_edit(
 @group_app.command("rename")
 def group_rename(old: str, new: str, vault_path: VaultOption = None) -> None:
     """Rename a group; its id and folder contents stay."""
+    root = _vault_root(vault_path)
     try:
-        result = vault.rename_group(_root(vault_path), old, new)
-    except (ValueError, FileNotFoundError, FileExistsError) as error:
+        result = vault.rename_group(root, old, new)
+    except (ValueError, OSError) as error:
         _fail(str(error))
     _report(f"Renamed {old!r} to {new!r}", result)
 
@@ -117,9 +128,10 @@ def group_rename(old: str, new: str, vault_path: VaultOption = None) -> None:
 @group_app.command("delete")
 def group_delete(name: str, vault_path: VaultOption = None) -> None:
     """Delete a group. Its files go to Unsorted on the next sync."""
+    root = _vault_root(vault_path)
     try:
-        result = vault.delete_group(_root(vault_path), name)
-    except FileNotFoundError as error:
+        result = vault.delete_group(root, name)
+    except (ValueError, OSError) as error:
         _fail(str(error))
     _report(f"Deleted {name!r}", result)
 
@@ -127,8 +139,9 @@ def group_delete(name: str, vault_path: VaultOption = None) -> None:
 @group_app.command("list")
 def group_list(vault_path: VaultOption = None) -> None:
     """Show the current set version and its groups."""
+    root = _vault_root(vault_path)
     try:
-        result = vault.sync_group_set(_root(vault_path))
+        result = vault.sync_group_set(root)
     except (ValueError, OSError) as error:
         _fail(str(error))
     typer.echo(f"Set version {result.version}")
@@ -137,14 +150,6 @@ def group_list(vault_path: VaultOption = None) -> None:
         if group.excludes:
             line += f"; excludes {group.excludes}"
         typer.echo(line)
-
-
-def _vault_root(vault_path: Path | None) -> Path:
-    """Like _root, but fails when the folder has not been set up as a vault."""
-    root = _root(vault_path)
-    if not Config.path(root).exists():
-        _fail(f"no vault at {root}; run `p0 init` first")
-    return root
 
 
 @app.command("sort")
@@ -308,6 +313,7 @@ def sync_edits(vault_path: VaultOption = None) -> None:
         "confirmed": report.confirmed,
         "unfrozen": report.unfrozen,
         "sent to Unsorted, group deleted": report.orphaned,
+        "put back in its group's folder": report.rehomed,
         "original missing": report.missing_sources,
     }
     for what, file_ids in picked_up.items():
@@ -320,7 +326,7 @@ def sync_edits(vault_path: VaultOption = None) -> None:
         typer.echo(
             f"Moved {len(report.moved)}, confirmed {len(report.confirmed)}, "
             f"unfrozen {len(report.unfrozen)}, sent to Unsorted {len(report.orphaned)}, "
-            f"originals missing {len(report.missing_sources)}."
+            f"put back {len(report.rehomed)}, originals missing {len(report.missing_sources)}."
         )
     elif not new_set:
         typer.echo("Nothing to pick up.")

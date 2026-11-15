@@ -5,12 +5,22 @@ import hashlib
 import pytest
 
 from decide_already import vault
-from decide_already.backends.base import BackendError, BudgetExceeded, SortResult
+from decide_already.backends.base import BackendError, BudgetExceeded, LogFailed, SortResult
 from decide_already.card import VARIANTS, Card, build_card, render_card
 from decide_already.config import JEV_LOG_FILE, LABELS_FILE, Config, decide_path
-from decide_already.corrections import freeze, move_file
+from decide_already.corrections import active_labels, freeze, move_file, sync, unfreeze
 from decide_already.log import append_jsonl, read_jsonl
-from decide_already.sort import NOT_REACHED, Decision, SortReport, decide, judge, sort_vault
+from decide_already.sort import (
+    CHANGED_BY_HAND,
+    NO_NOTE,
+    NOT_REACHED,
+    STOPPED_BEFORE,
+    Decision,
+    SortReport,
+    decide,
+    judge,
+    sort_vault,
+)
 from decide_already.types import File, Group
 from fakes import FakeBackend
 
@@ -517,15 +527,16 @@ def test_a_note_left_in_a_deleted_groups_folder_is_replaced_by_the_rerun(root):
     """An unfrozen file whose group was deleted is sorted again, and its old note goes."""
     drop(root, "a.txt")
     sort_vault(root, FakeBackend(default=TO_HW))
+    vault.delete_group(root, "HW")  # the folder is set aside, since the note is still in it
     old = note_of(root, "a.txt").path
-    vault.delete_group(root, "HW")  # the folder stays, since the note is still in it
-    assert old.exists()
+    assert old == root / "HW (old)" / "a.txt.md"
 
     answer = ({"logistics": 0.9, "project": 0.1}, 0.95)
     report = sort_vault(root, FakeBackend(default=answer))
     assert (report.set_version, report.asked, report.placed) == (4, 1, 1)
     assert note_of(root, "a.txt").path == root / "Logistics" / "a.txt.md"
     assert not old.exists()
+    assert not (root / "HW (old)").exists()  # emptied by the sort's sync, so it is removed
 
 
 def test_a_frozen_file_whose_content_changed_is_sorted_again(root):
@@ -533,6 +544,7 @@ def test_a_frozen_file_whose_content_changed_is_sorted_again(root):
     path = drop(root, "a.txt", "Homework 3: implement the kernel functions.\n")
     sort_vault(root, FakeBackend(default=TO_HW))
     freeze_by_hand(root, "a.txt")
+    assert sync(root).confirmed == ["a.txt"]  # the freeze is on record before the change
     old_hash = note_of(root, "a.txt").placement.content_hash
     path.write_text("Syllabus: grading, deadlines and office hours.\n", encoding="utf-8")
 
@@ -1024,3 +1036,275 @@ def test_a_frozen_file_with_the_same_content_keeps_its_label_through_a_rerun(roo
     assert (report.frozen_skipped, report.asked) == (1, 0)
     assert note.read_bytes() == before
     assert labels(root) == [label("a.txt", "confirmed", "hw", "hw")]
+
+
+def test_a_file_frozen_by_hand_after_its_content_changed_stays_frozen(root):
+    """The freeze is for the content the user had in front of them, so the sort leaves it."""
+    path = drop(root, "a.txt", "Homework 3: implement the kernel functions.\n")
+    sort_vault(root, FakeBackend(default=TO_HW))
+    path.write_text("Syllabus: grading, deadlines and office hours.\n", encoding="utf-8")
+    freeze_by_hand(root, "a.txt")
+
+    backend = FakeBackend(default=TO_LOGISTICS)
+    report = sort_vault(root, backend)
+    assert (report.frozen_skipped, report.asked, report.errors) == (1, 0, {})
+    assert backend.calls == []
+    note = note_of(root, "a.txt")
+    assert (note.folder, note.placement.frozen, note.placement.placed_by) == ("HW", True, "jev")
+    assert note.placement.content_hash == hashlib.sha256(path.read_bytes()).hexdigest()
+    assert "Syllabus: grading" in note.body  # the card shows what the freeze is about
+    assert labels(root) == [label("a.txt", "confirmed", "hw", "hw")]
+
+    # A change after the freeze still takes it off.
+    path.write_text("Project proposal: due in week 4.\n", encoding="utf-8")
+    report = sort_vault(root, FakeBackend(default=TO_LOGISTICS))
+    assert (report.frozen_skipped, report.asked, report.placed) == (0, 1, 1)
+    assert labels(root)[1:] == [label("a.txt", "unfrozen", "hw", "hw")]
+    assert note_of(root, "a.txt").folder == "Logistics"
+
+
+# Card notes that Obsidian touched
+
+
+def test_a_frozen_file_whose_note_gained_a_property_is_still_skipped(root):
+    """A tag added in Obsidian does not send a frozen file back to the model."""
+    drop(root, "sheet.txt")
+    drop(root, "other.txt")
+    sort_vault(root, FakeBackend(default=TO_LOGISTICS))
+    move_file(root, "sheet.txt", "HW")
+    path = note_of(root, "sheet.txt").path
+    text = path.read_text(encoding="utf-8")
+    path.write_text(text.replace("\n---\n", "\ntags: [review]\n---\n", 1), encoding="utf-8")
+    before = path.read_bytes()
+
+    backend = FakeBackend(default=TO_LOGISTICS)
+    report = sort_vault(root, backend)
+    assert [request.file_id for request in backend.calls] == ["other.txt"]
+    assert (report.frozen_skipped, report.asked, report.errors) == (1, 1, {})
+    assert path.read_bytes() == before
+    assert active_labels(root)["sheet.txt"].kind == "moved"
+    assert labels(root) == [
+        label("sheet.txt", "moved", "logistics", "hw", jev_probs=TO_LOGISTICS[0])
+    ]
+
+    # Unfrozen and sorted again, the note keeps the property.
+    unfreeze(root, "sheet.txt")
+    sort_vault(root, FakeBackend(default=TO_LOGISTICS))
+    note = note_of(root, "sheet.txt")
+    assert (note.folder, note.placement.placed_by, note.extras) == (
+        "Logistics",
+        "jev",
+        {"tags": ["review"]},
+    )
+
+
+def test_a_frozen_file_whose_note_was_filed_into_a_folder_of_its_group_is_still_skipped(root):
+    """HW/week 3 is still HW: the file is not sent again, and no second note is written."""
+    drop(root, "sheet.txt")
+    sort_vault(root, FakeBackend(default=TO_LOGISTICS))
+    move_file(root, "sheet.txt", "HW")
+    path = note_of(root, "sheet.txt").path
+    (root / "HW" / "week 3").mkdir()
+    nested = path.rename(root / "HW" / "week 3" / path.name)
+
+    backend = FakeBackend(default=TO_LOGISTICS)
+    report = sort_vault(root, backend)
+    assert backend.calls == []
+    assert (report.frozen_skipped, report.errors) == (1, {})
+    assert note_of(root, "sheet.txt").path == nested  # one note, where the user filed it
+    assert active_labels(root)["sheet.txt"].kind == "moved"
+
+
+def test_a_labeled_file_without_a_card_note_is_not_sent_to_the_model(root):
+    """The note is gone or broken, but the user's label stands: the sort reports the file."""
+    drop(root, "deleted.txt")
+    drop(root, "broken.txt")
+    drop(root, "plain.txt")
+    sort_vault(root, FakeBackend(default=TO_LOGISTICS))
+    move_file(root, "deleted.txt", "HW")
+    freeze(root, "broken.txt")
+    note_of(root, "deleted.txt").path.unlink()
+    broken = note_of(root, "broken.txt").path
+    text = broken.read_text(encoding="utf-8")
+    broken.write_text(text.replace("placed_by: jev", "placed_by: [oops"), encoding="utf-8")
+    note_of(root, "plain.txt").path.unlink()  # no label: a deleted note just means a new file
+
+    backend = FakeBackend(default=TO_LOGISTICS)
+    progress = []
+    report = sort_vault(root, backend, lambda done, total: progress.append((done, total)))
+    assert [request.file_id for request in backend.calls] == ["plain.txt"]
+    assert report.errors == {"broken.txt": NO_NOTE, "deleted.txt": NO_NOTE}
+    assert "p0 unfreeze" in NO_NOTE
+    assert (report.asked, report.placed, report.frozen_skipped) == (1, 1, 0)
+    assert progress == [(1, 3), (2, 3), (3, 3)]
+    assert [note.placement.file_id for note in vault.read_card_notes(root)] == ["plain.txt"]
+    assert sorted(active_labels(root)) == ["broken.txt", "deleted.txt"]
+    # Reported every time, never asked, until the user decides.
+    again = FakeBackend(default=TO_LOGISTICS)
+    assert sort_vault(root, again).errors == report.errors
+    assert [request.file_id for request in again.calls] == ["plain.txt"]
+
+
+def test_unfreezing_a_labeled_file_without_a_card_note_starts_it_from_scratch(root):
+    """The way out: the label is withdrawn, and the next sort treats the file as new."""
+    drop(root, "sheet.txt")
+    sort_vault(root, FakeBackend(default=TO_LOGISTICS))
+    move_file(root, "sheet.txt", "HW")
+    note_of(root, "sheet.txt").path.unlink()
+    assert sort_vault(root, FakeBackend(default=TO_LOGISTICS)).errors == {"sheet.txt": NO_NOTE}
+
+    assert unfreeze(root, "sheet.txt") == ["sheet.txt"]
+    assert labels(root)[1:] == [
+        {
+            "file_id": "sheet.txt",
+            "kind": "unfrozen",
+            "from_group": "hw",
+            "to_group": "hw",
+            "jev_probs": None,
+            "jev_set_version": None,
+            "set_version": 3,
+        }
+    ]
+    assert active_labels(root) == {}
+    backend = FakeBackend(default=TO_LOGISTICS)
+    report = sort_vault(root, backend)
+    assert [request.file_id for request in backend.calls] == ["sheet.txt"]
+    assert (report.asked, report.placed, report.errors) == (1, 1, {})
+    note = note_of(root, "sheet.txt")
+    assert (note.folder, note.placement.placed_by, note.placement.frozen) == (
+        "Logistics",
+        "jev",
+        False,
+    )
+    # With the page's exact reading, and for a file that has nothing to withdraw.
+    move_file(root, "sheet.txt", "HW")
+    note_of(root, "sheet.txt").path.unlink()
+    assert unfreeze(root, "sheet.txt", kind="file") == ["sheet.txt"]
+    with pytest.raises(ValueError, match="no sorted file with the id 'sheet.txt'"):
+        unfreeze(root, "sheet.txt", kind="file")
+    with pytest.raises(ValueError, match="no group or sorted file with the id or name"):
+        unfreeze(root, "sheet.txt")
+
+
+# Edits made by hand while a sort is running
+
+
+class EditingBackend(FakeBackend):
+    """A fake that makes an edit by hand when it is asked about one file.
+
+    That is what a person does in Obsidian while a long sort is under way: the sort has
+    read the card notes already, and has not reached every file yet.
+    """
+
+    def __init__(self, when, edit, **answers):
+        """Run `edit()` once, when the request for the file `when` arrives."""
+        super().__init__(**answers)
+        self.when = when
+        self.edit = edit
+
+    def sort(self, request):
+        """Make the edit when its moment comes, then answer as FakeBackend would."""
+        if request.file_id == self.when and self.edit is not None:
+            edit, self.edit = self.edit, None
+            edit()
+        return super().sort(request)
+
+
+def three_files_in(root, group_answer):
+    """Sort a.txt, b.txt and c.txt into one group, and return c.txt's card note path."""
+    for file_id in ("a.txt", "b.txt", "c.txt"):
+        drop(root, file_id)
+    sort_vault(root, FakeBackend(default=group_answer))
+    return note_of(root, "c.txt").path
+
+
+@pytest.mark.parametrize(
+    ("target", "group_id"),
+    [("HW", "hw"), ("Project", "project")],
+    ids=["a folder before the model's", "a folder after the model's"],
+)
+def test_a_note_dragged_while_the_sort_runs_is_left_where_the_user_put_it(root, target, group_id):
+    """The sort read c.txt's note in Logistics. The user drags it away before its turn."""
+    note = three_files_in(root, TO_LOGISTICS)
+
+    def drag():
+        """Move c.txt's card note into another group's folder."""
+        note.rename(root / target / note.name)
+
+    backend = EditingBackend("b.txt", drag, default=TO_LOGISTICS)
+    report = sort_vault(root, backend)
+    assert report.errors == {"c.txt": CHANGED_BY_HAND}
+    # The model is not asked about a file whose note the user has just changed.
+    assert [request.file_id for request in backend.calls] == ["a.txt", "b.txt"]
+    assert (report.asked, report.placed) == (2, 2)
+    assert note_of(root, "c.txt").path == root / target / "c.txt.md"  # one note, not two
+    assert labels(root) == []
+
+    # The next sync reads the drag as what it is: a move by the user.
+    assert sync(root).moved == ["c.txt"]
+    placement = note_of(root, "c.txt").placement
+    assert (placement.group_id, placement.placed_by, placement.frozen) == (group_id, "you", True)
+    assert labels(root) == [
+        label("c.txt", "moved", "logistics", group_id, jev_probs=TO_LOGISTICS[0])
+    ]
+    later = FakeBackend(default=TO_LOGISTICS)
+    assert sort_vault(root, later).errors == {}
+    assert [request.file_id for request in later.calls] == ["a.txt", "b.txt"]
+    assert note_of(root, "c.txt").path == root / target / "c.txt.md"
+
+
+def test_a_note_frozen_by_hand_while_the_sort_runs_keeps_its_freeze(root):
+    """frozen: true is set on c.txt's note mid-run. The sort does not write over it."""
+    three_files_in(root, TO_HW)
+    backend = EditingBackend("b.txt", lambda: freeze_by_hand(root, "c.txt"), default=TO_LOGISTICS)
+    report = sort_vault(root, backend)
+    assert report.errors == {"c.txt": CHANGED_BY_HAND}
+    assert [request.file_id for request in backend.calls] == ["a.txt", "b.txt"]
+    note = note_of(root, "c.txt")
+    assert (note.folder, note.placement.frozen, note.placement.placed_by) == ("HW", True, "jev")
+
+    report = sort_vault(root, FakeBackend(default=TO_LOGISTICS))
+    assert (report.frozen_skipped, report.errors) == (1, {})
+    assert labels(root) == [label("c.txt", "confirmed", "hw", "hw")]
+    assert note_of(root, "c.txt").folder == "HW"
+
+
+def test_a_note_changed_while_the_model_is_asked_about_its_file_is_not_written_over(root):
+    """The edit lands during the file's own request: the answer is dropped, not the edit."""
+    three_files_in(root, TO_HW)
+    backend = EditingBackend("c.txt", lambda: freeze_by_hand(root, "c.txt"), default=TO_LOGISTICS)
+    report = sort_vault(root, backend)
+    assert report.errors == {"c.txt": CHANGED_BY_HAND}
+    assert (report.asked, report.placed) == (3, 2)  # the request for c.txt did go out
+    note = note_of(root, "c.txt")
+    assert (note.folder, note.placement.frozen) == ("HW", True)
+    assert [note.folder for note in vault.read_card_notes(root)] == ["Logistics", "Logistics", "HW"]
+
+
+def test_the_sorts_own_rewrite_of_a_note_is_not_taken_for_an_edit_by_hand(root):
+    """A frozen file whose content changed: the freeze comes off, then the new note is written."""
+    path = drop(root, "a.txt", "Homework 3: implement the kernel functions.\n")
+    sort_vault(root, FakeBackend(default=TO_HW))
+    freeze(root, "a.txt")
+    path.write_text("Syllabus: grading, deadlines and office hours.\n", encoding="utf-8")
+    report = sort_vault(root, FakeBackend(default=TO_LOGISTICS))
+    assert (report.asked, report.placed, report.errors) == (1, 1, {})
+    assert note_of(root, "a.txt").folder == "Logistics"
+
+
+# A backend that stops the run
+
+
+def test_a_call_log_that_cannot_be_written_stops_the_run_like_the_spend_cap(root):
+    """Every call must be logged, so nothing more is sent, and the files not reached are listed."""
+    for file_id in ("a.txt", "b.txt", "c.txt"):
+        drop(root, file_id)
+    reason = "the call log cannot be written: [Errno 28] No space left on device"
+    backend = ScriptedBackend([{}, LogFailed(reason), {}])
+    progress = []
+    report = sort_vault(root, backend, lambda done, total: progress.append((done, total)))
+    assert report.errors == {"b.txt": reason, "c.txt": STOPPED_BEFORE}
+    assert "spend cap" not in STOPPED_BEFORE
+    assert [request.file_id for request in backend.calls] == ["a.txt", "b.txt"]
+    assert [note.placement.file_id for note in vault.read_card_notes(root)] == ["a.txt"]
+    assert progress == [(1, 3)]

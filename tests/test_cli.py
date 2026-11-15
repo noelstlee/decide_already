@@ -8,6 +8,7 @@ from decide_already.card import hash_file
 from decide_already.cli import app
 from decide_already.config import JEV_LOG_FILE, LABELS_FILE, Config, decide_path
 from decide_already.log import append_jsonl, read_jsonl
+from decide_already.sort import NO_NOTE
 from decide_already.types import Placement
 from decide_already.vault import add_group, init_vault, read_card_notes, write_card_note
 from fakes import FakeBackend
@@ -50,16 +51,36 @@ def test_init_then_group_commands(tmp_path):
 
 
 def test_errors_exit_nonzero(tmp_path):
-    """A known failure prints an error line and exits with status 1."""
+    """A known failure prints one error line and exits with status 1. It is never a crash."""
     runner.invoke(app, ["init", str(tmp_path)])
-    vault = ["--vault", str(tmp_path)]
-    result = runner.invoke(app, ["group", "add", "HW", "--covers", "  ", *vault])
-    assert result.exit_code == 1
-    assert "covers description" in result.output
-    result = runner.invoke(app, ["group", "edit", "Nope", "--covers", "x", *vault])
-    assert result.exit_code == 1
-    result = runner.invoke(app, ["group", "edit", "HW", *vault])
-    assert result.exit_code == 1
+    for name in ("HW", "Logistics"):
+        runner.invoke(app, ["group", "add", name, "--covers", "x", "--vault", str(tmp_path)])
+    cases = {
+        ("group", "add", "Exams", "--covers", "  "): "every group needs a covers description",
+        ("group", "add", "HW", "--covers", "again"): "group 'HW' already exists",
+        ("group", "add", "Unsorted", "--covers", "x"): (
+            "'Unsorted' cannot be a group name: that folder holds the originals or is one of "
+            "the tool's own"
+        ),
+        ("group", "edit", "Nope", "--covers", "x"): "no group named 'Nope'",
+        ("group", "edit", "HW"): "pass --covers and/or --excludes",
+        ("group", "edit", "HW", "--covers", " "): "every group needs a covers description",
+        ("group", "rename", "Nope", "Exams"): "no group named 'Nope'",
+        ("group", "rename", "HW", "Logistics"): "group 'Logistics' already exists",
+        ("group", "rename", "HW", "a/b"): "'a/b' cannot be a group name",
+        ("group", "delete", "Nope"): "no group named 'Nope'",
+    }
+    for command, message in cases.items():
+        result = runner.invoke(app, [*command, "--vault", str(tmp_path)])
+        assert isinstance(result.exception, SystemExit), command  # not an uncaught error
+        assert result.exit_code == 1, command
+        assert result.output == f"error: {message}\n", command
+    listed = runner.invoke(app, ["group", "list", "--vault", str(tmp_path)])
+    assert listed.output.splitlines() == [
+        "Set version 2",
+        "  HW (hw): covers x",
+        "  Logistics (logistics): covers x",
+    ]
 
 
 def test_init_with_missing_dump_fails(tmp_path):
@@ -538,7 +559,7 @@ def test_suggest_exits_1_when_the_backend_cannot_be_built(root, monkeypatch):
 
 def test_sync_prints_what_it_picked_up(root):
     """One line per file for each kind of edit made by hand, the new set, then the totals."""
-    for file_id in ("dragged.txt", "frozen.txt", "thawed.txt", "gone.txt"):
+    for file_id in ("dragged.txt", "frozen.txt", "thawed.txt", "gone.txt", "stray.txt"):
         place(root, file_id, "hw")
     place(root, "orphan.txt", "project")
     p0(root, "freeze", "thawed.txt")
@@ -546,6 +567,8 @@ def test_sync_prints_what_it_picked_up(root):
 
     dragged = root / "HW" / "dragged.txt.md"
     dragged.rename(root / "Logistics" / dragged.name)
+    (root / "Old stuff").mkdir()  # a folder that is no group: a note dragged there is put back
+    (root / "HW" / "stray.txt.md").rename(root / "Old stuff" / "stray.txt.md")
     for name, old, new in (("frozen.txt", "false", "true"), ("thawed.txt", "true", "false")):
         note = root / "HW" / f"{name}.md"
         text = note.read_text(encoding="utf-8")
@@ -559,15 +582,17 @@ def test_sync_prints_what_it_picked_up(root):
         "confirmed: frozen.txt",
         "unfrozen: thawed.txt",
         "sent to Unsorted, group deleted: orphan.txt",
+        "put back in its group's folder: stray.txt",
         "original missing: gone.txt",
         "Group notes changed: set version 4.",
-        "Moved 1, confirmed 1, unfrozen 1, sent to Unsorted 1, originals missing 1.",
+        "Moved 1, confirmed 1, unfrozen 1, sent to Unsorted 1, put back 1, originals missing 1.",
     ]
     assert folders(root) == {
         "dragged.txt": "Logistics",
         "frozen.txt": "HW",
         "gone.txt": "HW",
         "orphan.txt": "Unsorted",
+        "stray.txt": "HW",
         "thawed.txt": "HW",
     }
     assert labels(root) == [
@@ -579,7 +604,7 @@ def test_sync_prints_what_it_picked_up(root):
     # Again: all of it is recorded, so only the missing original is still listed.
     assert p0(root, "sync").splitlines() == [
         "original missing: gone.txt",
-        "Moved 0, confirmed 0, unfrozen 0, sent to Unsorted 0, originals missing 1.",
+        "Moved 0, confirmed 0, unfrozen 0, sent to Unsorted 0, put back 0, originals missing 1.",
     ]
     assert len(labels(root)) == 4
 
@@ -655,7 +680,7 @@ def test_the_walkthrough_through_the_commands(tmp_path, monkeypatch):
     sheet.rename(root / "Logistics" / sheet.name)
     assert p0(root, "sync").splitlines() == [
         "moved: project_logistics_sheet.md",
-        "Moved 1, confirmed 0, unfrozen 0, sent to Unsorted 0, originals missing 0.",
+        "Moved 1, confirmed 0, unfrozen 0, sent to Unsorted 0, put back 0, originals missing 0.",
     ]
     assert p0(root, "freeze", "Lecture slides and notes") == (
         "frozen: lecture_slides.md\nFroze 1 file.\n"
@@ -688,4 +713,287 @@ def test_the_walkthrough_through_the_commands(tmp_path, monkeypatch):
         ("confirmed", "syllabus.md", "logistics", "logistics"),
         ("moved", "project_logistics_sheet.md", "project", "logistics"),
         ("confirmed", "lecture_slides.md", lectures, lectures),
+    ]
+
+
+# Running p0 inside the vault, with no --vault
+
+
+def test_the_commands_find_the_vault_from_a_folder_inside_it(root, monkeypatch):
+    """The usual way to run p0: from the vault or a folder in it, with no --vault."""
+    drop(root, "a.txt")
+    use_backend(monkeypatch, FakeBackend(default=TO_HW))
+    monkeypatch.chdir(root / "HW")
+    result = runner.invoke(app, ["sort"])
+    assert result.exit_code == 0, result.output
+    assert result.output.startswith("Asked 1, placed 1, Unsorted 0")
+    result = runner.invoke(app, ["board"])
+    assert result.exit_code == 0, result.output
+    assert result.output.splitlines()[:3] == ["Set version 3", "HW (1)", "  a.txt  0.91"]
+    monkeypatch.chdir(root)
+    result = runner.invoke(app, ["group", "list"])
+    assert result.output.startswith("Set version 3\n  HW (hw): covers homework specs")
+    assert runner.invoke(app, ["freeze", "a.txt"]).output == "frozen: a.txt\nFroze 1 file.\n"
+
+
+def test_the_commands_exit_1_when_no_vault_is_at_or_above_the_folder(tmp_path, monkeypatch):
+    """Outside any vault and with no --vault: one error line that says to run p0 init."""
+    for above in [tmp_path.resolve(), *tmp_path.resolve().parents]:
+        if Config.path(above).exists():
+            pytest.skip(f"{above} is a vault, so no temp folder under it is outside one")
+    use_backend(monkeypatch, FakeBackend())
+    monkeypatch.chdir(tmp_path)
+    commands = (
+        ("board",),
+        ("sort",),
+        ("sync",),
+        ("move", "a.txt", "HW"),
+        ("group", "list"),
+        ("group", "add", "HW", "--covers", "homework"),
+    )
+    for command in commands:
+        result = runner.invoke(app, list(command))
+        assert isinstance(result.exception, SystemExit), command
+        assert result.exit_code == 1, command
+        assert result.output.startswith("error: no vault at or above"), command
+        assert result.output.endswith("run `p0 init` first\n"), command
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_the_group_commands_exit_1_in_a_folder_that_is_not_a_vault(tmp_path):
+    """--vault names a plain folder: an error line, and nothing is created in it."""
+    commands = (
+        ("group", "add", "HW", "--covers", "homework"),
+        ("group", "edit", "HW", "--covers", "homework"),
+        ("group", "rename", "HW", "Homework"),
+        ("group", "delete", "HW"),
+        ("group", "list"),
+    )
+    for command in commands:
+        assert p0(tmp_path, *command, exit_code=1) == (
+            f"error: no vault at {tmp_path.resolve()}; run `p0 init` first\n"
+        )
+    assert list(tmp_path.iterdir()) == []
+
+
+# Slips made by hand are error lines, never tracebacks
+
+EVERY_COMMAND = (
+    ("group", "list"),
+    ("group", "add", "Exams", "--covers", "midterms"),
+    ("group", "edit", "HW", "--covers", "problem sets"),
+    ("group", "rename", "HW", "Homework"),
+    ("group", "delete", "Project"),
+    ("board",),
+    ("sync",),
+    ("sort",),
+    ("suggest",),
+    ("move", "a.txt", "HW"),
+    ("freeze", "HW"),
+    ("unfreeze", "HW"),
+)
+
+
+def fails_with_a_line(root, command):
+    """Run a command that must fail, check that it failed cleanly, and return its output."""
+    result = runner.invoke(app, [*command, "--vault", str(root)])
+    assert isinstance(result.exception, SystemExit), (command, result.exception)
+    assert result.exit_code == 1, command
+    assert result.output.startswith("error: "), command
+    assert "Traceback" not in result.output
+    return result.output
+
+
+@pytest.mark.parametrize(
+    ("frontmatter", "message"),
+    [
+        ("covers: syllabus, schedule, deadlines: for homework and projects", "not valid YAML"),
+        ("covers: [syllabus, schedule]", "the covers of a group must be text"),
+        ("covers: 2024", "the covers of a group must be text"),
+        ("covers: 2026-11-15", "the covers of a group must be text"),
+        ("- syllabus\n- schedule", "must be `key: value` lines"),
+    ],
+)
+def test_a_slip_in_a_group_note_is_an_error_line_from_every_command(
+    root, monkeypatch, frontmatter, message
+):
+    """A colon in a description, or a list where text belongs: each command names the note."""
+    place(root, "a.txt", "logistics")
+    note = root / "_groups" / "Logistics.md"
+    note.write_text(f"---\n{frontmatter}\n---\n", encoding="utf-8")
+    backend = FakeBackend()
+    use_backend(monkeypatch, backend)
+    for command in EVERY_COMMAND:
+        output = fails_with_a_line(root, command)
+        assert message in output, command
+        assert str(note) in output, command
+    assert backend.calls == []
+    # The rename was stopped before anything was renamed.
+    assert (root / "_groups" / "HW.md").exists()
+    assert (root / "HW").is_dir()
+    assert not (root / "Homework").exists()
+    # The delete was carried out, and its error line said so.
+    assert not (root / "_groups" / "Project.md").exists()
+    # Once the slip is fixed, everything works again.
+    note.write_text("---\nid: logistics\ncovers: syllabus\n---\n", encoding="utf-8")
+    assert p0(root, "group", "list").startswith("Set version 4\n")
+
+
+def test_a_delete_that_another_broken_note_follows_says_that_it_was_carried_out(root):
+    """The note is gone, as asked. The line says so before it names the note that is broken."""
+    draft = root / "_groups" / "Draft.md"
+    draft.write_text("---\nid: draft\n---\n", encoding="utf-8")
+    assert p0(root, "group", "delete", "HW", exit_code=1) == (
+        "error: the note of 'HW' was deleted, but the groups could not be recorded: "
+        f"group 'Draft' has no covers description: {draft}\n"
+    )
+    assert not (root / "_groups" / "HW.md").exists()
+    # Deleting the broken note is the way out.
+    assert p0(root, "group", "delete", "Draft") == "Deleted 'Draft'. Set version 4 (2 groups).\n"
+
+
+def test_a_slip_in_the_config_is_an_error_line_from_every_command(root, monkeypatch):
+    """A YAML slip in .decide/config.yaml: each command names the file and changes nothing."""
+    place(root, "a.txt", "hw")
+    config = Config.path(root)
+    text = config.read_text(encoding="utf-8")
+    config.write_text(text.replace("max_spend_usd: 5.0", "max_spend_usd: : 3"), encoding="utf-8")
+    built = use_backend(monkeypatch, FakeBackend())
+    for command in EVERY_COMMAND:
+        output = fails_with_a_line(root, command)
+        assert f"{config} is not valid YAML" in output, command
+    result = runner.invoke(app, ["init", str(root)])
+    assert (result.exit_code, isinstance(result.exception, SystemExit)) == (1, True)
+    assert result.output.startswith(f"error: {config} is not valid YAML")
+    assert built == []
+    assert sorted(path.name for path in (root / "_groups").iterdir()) == [
+        "HW.md",
+        "Logistics.md",
+        "Project.md",
+    ]
+
+
+def test_a_key_typed_into_the_config_is_never_printed(root, monkeypatch):
+    """`api_key: <key>` in the config by mistake: the setting is named, the key is not shown."""
+    key = "ts_live_MADEUP_0123456789abcdefghijklmnopqrstuvwxyz"
+    config = Config.path(root)
+    with config.open("a", encoding="utf-8") as handle:
+        handle.write(f"api_key: {key}\n")
+    built = use_backend(monkeypatch, FakeBackend())
+    outputs = [fails_with_a_line(root, command) for command in EVERY_COMMAND]
+    outputs.append(runner.invoke(app, ["init", str(root)]).output)
+    for output in outputs:
+        assert "api_key: Extra inputs are not permitted" in output
+        assert str(config) in output
+        assert key not in output
+        assert key[:10] not in output
+    assert built == []
+
+
+# The model pin
+
+
+@pytest.mark.parametrize(
+    "model", ["jev-latest", "jev-preview", "JEV-LATEST", "jev", "jev-1.14", ""]
+)
+def test_sort_exits_1_before_any_backend_is_built_when_the_model_is_not_an_exact_version(
+    root, monkeypatch, model
+):
+    """A config that names a moving alias never reaches the model: no client is even made."""
+    drop(root, "a.txt")
+    Config.load(root).model_copy(update={"model": model}).save(root)
+    built = use_backend(monkeypatch, FakeBackend(default=TO_HW))
+    for command in ("sort", "suggest"):
+        output = p0(root, command, exit_code=1)
+        assert output.startswith(f"error: {Config.path(root)} is not a valid config: ")
+        assert "model: an exact model version is needed, such as jev-1.14.0" in output
+    assert built == []
+    assert list((root / "HW").iterdir()) == []
+
+
+# The dump folder is never a group's
+
+
+@pytest.mark.parametrize("dump", [".", "./", "..", "_groups", "Unsorted/files", "/tmp/files"])
+def test_init_refuses_a_dump_folder_that_is_not_a_plain_folder_inside_the_vault(tmp_path, dump):
+    """`--dump .` made every note an original. It is refused, and nothing is set up."""
+    result = runner.invoke(app, ["init", str(tmp_path), "--dump", dump])
+    assert isinstance(result.exception, SystemExit)
+    assert result.exit_code == 1
+    assert result.output.startswith("error: the dump folder ")
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_no_group_command_moves_the_dump_folder(tmp_path, monkeypatch):
+    """`p0 init --dump lectures/`, then a group named after that folder: refused every way."""
+    originals = tmp_path / "lectures"
+    originals.mkdir()
+    (originals / "lecture01.txt").write_text("Lecture 1: what is learning?\n", encoding="utf-8")
+    result = runner.invoke(app, ["init", str(tmp_path), "--dump", "lectures/"])
+    assert result.exit_code == 0, result.output
+    assert "(dump: lectures, model: jev-1.14.0)" in result.output
+    p0(tmp_path, "group", "add", "Notes", "--covers", "lecture notes")
+    refused = "cannot be a group name: that folder holds the originals or is one of the tool's own"
+    for name in ("lectures", "Lectures", "LECTURES"):
+        added = p0(tmp_path, "group", "add", name, "--covers", "lecture notes", exit_code=1)
+        renamed = p0(tmp_path, "group", "rename", "Notes", name, exit_code=1)
+        assert added == renamed == f"error: {name!r} {refused}\n"
+    # A group note made by hand under that name stops every command, and moves nothing.
+    by_hand = tmp_path / "_groups" / "Lectures.md"
+    by_hand.write_text("---\ncovers: lecture notes\n---\n", encoding="utf-8")
+    use_backend(monkeypatch, FakeBackend())
+    for command in (("sort",), ("board",), ("group", "rename", "Lectures", "Slides")):
+        output = p0(tmp_path, *command, exit_code=1)
+        assert output == f"error: 'Lectures' {refused}: {by_hand}\n"
+    p0(tmp_path, "group", "delete", "Lectures")
+
+    backend = FakeBackend()
+    use_backend(monkeypatch, backend)
+    for _ in range(2):
+        assert p0(tmp_path, "sort").startswith("Asked 1, placed 1")
+    assert [request.file_id for request in backend.calls] == ["lecture01.txt"] * 2
+    assert [path.name for path in originals.iterdir()] == ["lecture01.txt"]
+    assert (originals / "lecture01.txt").read_text(encoding="utf-8").startswith("Lecture 1")
+    assert folders(tmp_path) == {"lecture01.txt": "Notes"}
+
+
+# Group notes that share an id, and labeled files whose note is gone
+
+
+def test_a_copied_group_note_is_an_error_line(root, monkeypatch):
+    """A group note duplicated in Obsidian carries the same id: the id is named, nothing runs."""
+    drop(root, "a.txt")
+    copy = root / "_groups" / "HW copy.md"
+    copy.write_bytes((root / "_groups" / "HW.md").read_bytes())
+    backend = FakeBackend()
+    use_backend(monkeypatch, backend)
+    for command in (("group", "list"), ("board",), ("sort",), ("sync",)):
+        assert p0(root, *command, exit_code=1) == "error: two group notes share an id: hw\n"
+    assert backend.calls == []
+    copy.unlink()
+    assert p0(root, "group", "list").startswith("Set version 3\n")
+
+
+def test_a_labeled_file_whose_note_is_gone_is_reported_and_unfreeze_is_the_way_out(
+    root, monkeypatch
+):
+    """The sort names the file and what to do. `p0 unfreeze` with its id starts it over."""
+    place(root, "week1/sheet.txt", "logistics")
+    p0(root, "move", "sheet.txt", "HW")
+    (root / "HW" / "week1__sheet.txt.md").unlink()
+    backend = FakeBackend(default=TO_LOGISTICS)
+    use_backend(monkeypatch, backend)
+    summary, error = p0(root, "sort", exit_code=1).splitlines()
+    assert summary.startswith("Asked 0, placed 0, Unsorted 0, close calls 0, frozen skipped 0.")
+    assert error == f"error: week1/sheet.txt: {NO_NOTE}"
+    assert backend.calls == []
+
+    assert p0(root, "unfreeze", "week1/sheet.txt") == (
+        "unfrozen: week1/sheet.txt\nUnfroze 1 file.\n"
+    )
+    assert p0(root, "sort").startswith("Asked 1, placed 1")
+    assert folders(root) == {"week1/sheet.txt": "Logistics"}
+    assert labels(root) == [
+        ("moved", "week1/sheet.txt", "logistics", "hw"),
+        ("unfrozen", "week1/sheet.txt", "hw", "hw"),
     ]

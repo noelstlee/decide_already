@@ -265,3 +265,46 @@ def test_the_board_can_be_sent_as_json(root):
     assert Board.model_validate(data) == build_board(root)
     assert data["groups"][0]["files"][0]["file_id"] == "a.txt"
     assert data["new_files"] == ["c.txt"]
+
+
+def test_a_groups_folder_counts_under_any_spelling_the_file_system_may_give_it(root):
+    """The folder HW was renamed to hw by hand. Its files are still HW's on the board."""
+    note(root, "a.txt", "hw")
+    note(root, "b.txt", "logistics")
+    (root / "HW").rename(root / "hw")
+    (root / "Logistics").rename(root / "LOGISTICS")
+    board = build_board(root)
+    assert [(column.group.id, names(column.files)) for column in board.groups] == [
+        ("hw", ["a.txt"]),
+        ("logistics", ["b.txt"]),
+    ]
+    assert board.unsorted == []
+
+
+def test_a_note_in_a_folder_that_is_no_groups_is_listed_where_sync_will_put_it(root):
+    """Under its own group when that group still exists, and under Unsorted when it is gone."""
+    note(root, "renamed.txt", "hw")
+    note(root, "stray.txt", "logistics")
+    note(root, "deleted.txt", "logistics")
+    note(root, "was_unsorted.txt", None)
+    (root / "Old stuff").mkdir()
+    for file_id in ("stray.txt", "was_unsorted.txt"):
+        path = next(root.glob(f"*/{file_id}.md"))
+        path.rename(root / "Old stuff" / path.name)
+    (root / "_groups" / "HW.md").rename(root / "_groups" / "Homework.md")  # by hand
+    board = build_board(root)
+    assert (root / "HW (old)" / "renamed.txt.md").exists()  # set aside, not synced yet
+    assert [(column.group.name, names(column.files)) for column in board.groups] == [
+        ("Homework", ["renamed.txt"]),
+        ("Logistics", ["deleted.txt", "stray.txt"]),
+    ]
+    assert board.groups[0].files[0].group_id == "hw"
+    assert names(board.unsorted) == ["was_unsorted.txt"]
+
+    vault.delete_group(root, "Logistics")
+    board = build_board(root)
+    assert [(column.group.name, names(column.files)) for column in board.groups] == [
+        ("Homework", ["renamed.txt"])
+    ]
+    assert names(board.unsorted) == ["deleted.txt", "stray.txt", "was_unsorted.txt"]
+    assert {file.group_id for file in board.unsorted} == {None}

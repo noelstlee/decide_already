@@ -71,21 +71,25 @@ def build_board(root: Path) -> Board:
     """Read the vault into a board.
 
     Files are grouped by the folder their card note sits in, which is their current group even
-    when a note was dragged there and not synced yet. A note in a folder that is no current
-    group (its group was deleted) is listed under Unsorted, where sync will move it.
-    The set version is the current one: group notes edited by hand are recorded as a new
-    version first, as every command that reads the groups does.
+    when a note was dragged there and not synced yet. Folders are matched to groups by key,
+    so a group's folder counts under any spelling the file system treats as the same. A note
+    in a folder that is no group's is listed where sync will put it: under its own group
+    when that group still exists (the group was renamed by hand), else under Unsorted (the
+    group was deleted). The set version is the current one: group notes edited by hand are
+    recorded as a new version first, as every command that reads the groups does.
     """
     group_set = vault.sync_group_set(root)
-    columns = {group.name: BoardGroup(group=group, files=[]) for group in group_set.groups}
+    columns = {group.id: BoardGroup(group=group, files=[]) for group in group_set.groups}
+    folders = vault.folder_ids(group_set.groups)
     unsorted: list[BoardFile] = []
     notes = vault.read_card_notes(root)
     for note in notes:
-        column = columns.get(note.folder)  # None for Unsorted and for a folder that is no group
-        if column is None:
-            unsorted.append(_board_file(note, None, group_set.version))
+        # A folder that is no group's says nothing: the note's own group decides, if it exists.
+        group_id = folders.get(vault.folder_key(note.folder), note.placement.group_id)
+        if group_id in columns:
+            columns[group_id].files.append(_board_file(note, group_id, group_set.version))
         else:
-            column.files.append(_board_file(note, column.group.id, group_set.version))
+            unsorted.append(_board_file(note, None, group_set.version))
     for files in [unsorted, *(column.files for column in columns.values())]:
         files.sort(key=_board_order)
     carded = {note.placement.file_id for note in notes}

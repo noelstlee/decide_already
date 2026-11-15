@@ -1,5 +1,7 @@
 """Card notes in vault.py: the dump listing, note names, and reading and writing the notes."""
 
+import unicodedata
+
 import pytest
 
 from decide_already import vault
@@ -212,7 +214,7 @@ def test_a_long_file_id_survives_the_round_trip(root):
 
 
 def test_read_card_notes_ignores_the_users_own_notes(root):
-    """A markdown file whose frontmatter is not a Placement is left out, and left alone."""
+    """A markdown file whose frontmatter holds no Placement is left out, and left alone."""
     card = vault.write_card_note(root, placement("a.txt"), "a card\n")
     card_text = card.read_text(encoding="utf-8")
     own = {
@@ -221,9 +223,10 @@ def test_read_card_notes_ignores_the_users_own_notes(root):
         "broken.md": "---\nfrozen: [unclosed\n---\nFrontmatter that is not YAML.\n",
         "list.md": "---\n- one\n- two\n---\nFrontmatter that is a list.\n",
         "word.md": "---\njust a word\n---\nFrontmatter that is a string.\n",
-        "extra field.md": card_text.replace("file_id: a.txt", "file_id: b.txt\ntag: mine"),
+        "zero.md": "---\n0\n---\nFrontmatter that is a number.\n",
         "missing field.md": card_text.replace("file_id: a.txt\n", ""),
         "wrong type.md": card_text.replace("set_version: 2", "set_version: two"),
+        "wrong value.md": card_text.replace("placed_by: jev", "placed_by: me"),
     }
     for name, text in own.items():
         (root / "HW" / name).write_text(text, encoding="utf-8")
@@ -234,29 +237,42 @@ def test_read_card_notes_ignores_the_users_own_notes(root):
         assert (root / "HW" / name).read_text(encoding="utf-8") == text
 
 
-def test_read_card_notes_looks_only_in_the_top_level_folders(root):
-    """Group folders, Unsorted and any other visible folder are read. Nothing else is."""
+def test_read_card_notes_looks_in_the_visible_folders_all_the_way_down(root):
+    """Group folders, Unsorted and any other visible folder are read, with the folders in them.
+
+    A note filed into a folder inside its group's folder is still in that group: its folder
+    is the top-level one.
+    """
     seen = {
         "HW/in-hw.md": "in-hw",
-        "Unsorted/in-unsorted.md": "in-unsorted",
+        "HW/week 1/nested.md": "nested",
+        "HW/week 1/drafts/nested-twice.md": "nested-twice",
         "Old group/left-behind.md": "left-behind",
+        "Unsorted/in-unsorted.md": "in-unsorted",
+        "Unsorted/later/unsorted-nested.md": "unsorted-nested",
     }
     unseen = {
         "_dump/in-dump.md": "in-dump",
+        "_dump/week 1/in-dump-nested.md": "in-dump-nested",
         "_groups/in-groups.md": "in-groups",
         ".decide/in-decide.md": "in-decide",
         ".obsidian/in-obsidian.md": "in-obsidian",
         ".trash/in-trash.md": "in-trash",
         "at-the-top.md": "at-the-top",
-        "HW/week 1/nested.md": "nested",
+        "HW/.hidden/in-a-hidden-folder.md": "in-a-hidden-folder",
         "HW/not-markdown.txt": "not-markdown",
     }
     for where, file_id in {**seen, **unseen}.items():
         write_by_hand(root / where, placement(file_id))
     notes = vault.read_card_notes(root)
-    assert ids(notes) == ["in-hw", "in-unsorted", "left-behind"]
-    assert [note.folder for note in notes] == ["HW", "Unsorted", "Old group"]
-    assert [note.path for note in notes] == [root / where for where in seen]
+    assert sorted(ids(notes)) == sorted(seen.values())
+    by_id = {note.placement.file_id: note for note in notes}
+    assert {file_id: by_id[file_id].path for file_id in by_id} == {
+        file_id: root / where for where, file_id in seen.items()
+    }
+    assert {file_id: note.folder for file_id, note in by_id.items()} == {
+        file_id: where.split("/")[0] for where, file_id in seen.items()
+    }
 
 
 def test_read_card_notes_leaves_out_the_custom_dump_folder(tmp_path):
@@ -266,6 +282,16 @@ def test_read_card_notes_leaves_out_the_custom_dump_folder(tmp_path):
     write_by_hand(tmp_path / "inbox" / "a.md", placement("in-the-dump"))
     write_by_hand(tmp_path / "_dump" / "b.md", placement("in-a-folder-that-is-not-the-dump"))
     assert ids(vault.read_card_notes(tmp_path)) == ["in-a-folder-that-is-not-the-dump"]
+
+
+def test_read_card_notes_leaves_out_the_folder_a_nested_dump_sits_in(tmp_path):
+    """With the dump at course/files, nothing under course is read: no group can be there."""
+    (tmp_path / "course" / "files").mkdir(parents=True)
+    vault.init_vault(tmp_path, "course/files/")
+    write_by_hand(tmp_path / "course" / "files" / "a.md", placement("an-original"))
+    write_by_hand(tmp_path / "course" / "b.md", placement("next-to-the-dump"))
+    write_by_hand(tmp_path / "Unsorted" / "c.md", placement("a-card-note", group_id=None))
+    assert ids(vault.read_card_notes(tmp_path)) == ["a-card-note"]
 
 
 def test_read_card_notes_is_sorted_by_file_id(root):
@@ -298,9 +324,24 @@ def test_group_id_of_folder_is_the_reverse(root):
     assert vault.group_id_of_folder(root, "HW") == "hw"
     assert vault.group_id_of_folder(root, "Logistics") == "logistics"
     assert vault.group_id_of_folder(root, "Unsorted") is None
-    for folder in ("Old group", "hw", "_dump", "_groups"):
+    for folder in ("Old group", "HW (old)", "homework", "_dump", "_groups"):
         with pytest.raises(KeyError):
             vault.group_id_of_folder(root, folder)
+
+
+def test_a_folder_is_its_groups_under_any_spelling_the_file_system_may_give_it(root):
+    """On a Mac, hw is the folder HW. It counts as HW's on every file system."""
+    vault.add_group(root, "Übungen", "exercises")
+    assert vault.group_id_of_folder(root, "hw") == "hw"
+    assert vault.group_id_of_folder(root, "LOGISTICS") == "logistics"
+    assert vault.group_id_of_folder(root, "unsorted") is None
+    assert vault.group_id_of_folder(root, unicodedata.normalize("NFD", "Übungen")) == "übungen"
+    assert vault.folder_ids(vault.read_groups(root)) == {
+        "hw": "hw",
+        "logistics": "logistics",
+        "übungen": "übungen",
+        "unsorted": None,
+    }
 
 
 def test_a_renamed_group_keeps_its_id_and_changes_its_folder(root):
@@ -463,3 +504,108 @@ def test_write_card_note_passes_over_a_listed_note_that_is_gone(root):
     old.unlink()
     new = vault.write_card_note(root, placement("a.txt", group_id="logistics"), "second\n", notes)
     assert [note.path for note in vault.read_card_notes(root)] == [new]
+
+
+# Card notes that Obsidian touched: added properties, and notes filed into a folder
+
+
+def add_properties(path, extra="tags:\n- review\n- week3\ndue: 2026-11-20\nrating: 4\n"):
+    """Add frontmatter keys to a card note by hand, the way Obsidian's properties do."""
+    text = path.read_text(encoding="utf-8")
+    assert text.count("\n---\n") == 1
+    path.write_text(text.replace("\n---\n", f"\n{extra}---\n"), encoding="utf-8")
+
+
+def test_a_card_note_with_properties_added_by_hand_is_still_a_card_note(root):
+    """Keys that are not placement fields do not turn a card note into one of the user's notes."""
+    path = vault.write_card_note(root, placement("a.txt", frozen=True), "a card\n")
+    add_properties(path)
+    (note,) = vault.read_card_notes(root)
+    assert note.placement == placement("a.txt", frozen=True)
+    assert note.body == "a card\n"
+    assert list(note.extras) == ["tags", "due", "rating"]
+    assert note.extras["tags"] == ["review", "week3"]
+    assert note.extras["rating"] == 4
+    # A key added in the middle of the placement fields is found as well.
+    text = path.read_text(encoding="utf-8")
+    path.write_text(text.replace("\nfrozen: true\n", "\naliases: [sheet]\nfrozen: true\n"))
+    (note,) = vault.read_card_notes(root)
+    assert note.placement.frozen is True
+    assert note.extras["aliases"] == ["sheet"]
+
+
+def test_a_rewrite_keeps_the_properties_after_the_placement_fields(root):
+    """Whatever the user added is written back, in place and when the note moves to a new group."""
+    path = vault.write_card_note(root, placement("a.txt"), "first\n")
+    add_properties(path)
+    again = vault.write_card_note(root, placement("a.txt", frozen=True), "second\n")
+    assert again == path
+    frontmatter, body = vault.read_note(path)
+    assert list(frontmatter) == [*Placement.model_fields, "tags", "due", "rating"]
+    assert frontmatter["tags"] == ["review", "week3"]
+    assert str(frontmatter["due"]) == "2026-11-20"
+    assert body == "second\n"
+
+    moved = vault.write_card_note(root, placement("a.txt", group_id="logistics"), "third\n")
+    assert moved == root / "Logistics" / "a.txt.md"
+    assert not path.exists()
+    (note,) = vault.read_card_notes(root)
+    assert note.placement == placement("a.txt", group_id="logistics")
+    assert list(note.extras) == ["tags", "due", "rating"]
+    # The list a caller passes in carries the properties too.
+    notes = vault.read_card_notes(root)
+    vault.write_card_note(root, placement("a.txt", group_id=None), "fourth\n", notes)
+    (note,) = vault.read_card_notes(root)
+    assert (note.folder, note.extras["rating"]) == ("Unsorted", 4)
+
+
+def test_a_note_without_properties_is_written_as_before(root):
+    """No extras means the frontmatter is the placement and nothing else."""
+    path = vault.write_card_note(root, placement("a.txt"), "a card\n")
+    (note,) = vault.read_card_notes(root)
+    assert note.extras == {}
+    assert vault.card_frontmatter(note.placement, note.extras) == vault.read_note(path)[0]
+
+
+def test_a_rewrite_puts_a_nested_note_at_the_top_of_its_groups_folder(root):
+    """A note filed into HW/week 3 is read as HW's. Writing it again leaves one note, in HW."""
+    path = vault.write_card_note(root, placement("a.txt", frozen=True), "first\n")
+    add_properties(path, "tags: [review]\n")
+    (root / "HW" / "week 3").mkdir()
+    nested = path.rename(root / "HW" / "week 3" / path.name)
+    (note,) = vault.read_card_notes(root)
+    assert (note.path, note.folder) == (nested, "HW")
+    assert note.placement == placement("a.txt", frozen=True)
+
+    again = vault.write_card_note(root, placement("a.txt"), "second\n")
+    assert again == path
+    assert not nested.exists()
+    (note,) = vault.read_card_notes(root)
+    assert (note.path, note.body, note.extras) == (path, "second\n", {"tags": ["review"]})
+
+
+def test_unchanged_tells_whether_a_note_is_as_it_was_read(root):
+    """Same place, size and time: unchanged. Edited, moved or deleted: not."""
+    for file_id in ("edited.txt", "moved.txt", "deleted.txt", "kept.txt", "rewritten.txt"):
+        vault.write_card_note(root, placement(file_id), "a card\n")
+    notes = {note.placement.file_id: note for note in vault.read_card_notes(root)}
+    assert all(vault.unchanged(note) for note in notes.values())
+
+    edited = notes["edited.txt"].path
+    text = edited.read_text(encoding="utf-8")
+    edited.write_text(text.replace("frozen: false", "frozen: true"), encoding="utf-8")
+    notes["moved.txt"].path.rename(root / "Logistics" / "moved.txt.md")
+    notes["deleted.txt"].path.unlink()
+    changed = {file_id: vault.unchanged(note) for file_id, note in notes.items()}
+    assert changed == {
+        "edited.txt": False,
+        "moved.txt": False,
+        "deleted.txt": False,
+        "kept.txt": True,
+        "rewritten.txt": True,
+    }
+    # After the tool's own rewrite, restamp makes the note count as unchanged again.
+    rewritten = notes["rewritten.txt"]
+    vault.write_note(rewritten.path, {"frozen": True}, "written by the tool\n")
+    assert not vault.unchanged(rewritten)
+    assert vault.unchanged(vault.restamp(rewritten))

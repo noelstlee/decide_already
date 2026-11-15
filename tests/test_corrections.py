@@ -1,10 +1,13 @@
 """corrections.py: sync of edits made by hand, move, freeze, unfreeze, suggest, and the labels."""
 
+import unicodedata
+
 import pytest
 
 from decide_already import vault
-from decide_already.backends.base import BudgetExceeded
-from decide_already.card import hash_file
+from decide_already.backends.base import BudgetExceeded, LogFailed
+from decide_already.board import build_board
+from decide_already.card import build_card, hash_file, render_card
 from decide_already.config import LABELS_FILE, SUGGESTIONS_FILE, Config, decide_path
 from decide_already.corrections import (
     SyncReport,
@@ -118,8 +121,8 @@ def label(file_id, kind, from_group, to_group, set_version=3, jev_probs=PROBS, j
 
 def picked_up(set_version=3, **lists):
     """The report of a sync that picked up only what is named here."""
-    empty = {"moved": [], "confirmed": [], "unfrozen": [], "orphaned": [], "missing_sources": []}
-    return SyncReport(**{**empty, **lists}, set_version=set_version)
+    names = ("moved", "confirmed", "unfrozen", "orphaned", "rehomed", "missing_sources")
+    return SyncReport(**{**{name: [] for name in names}, **lists}, set_version=set_version)
 
 
 def snapshot(root):
@@ -136,6 +139,12 @@ def state(root, file_id):
     note = note_of(root, file_id)
     placement = note.placement
     return (note.folder, placement.group_id, placement.placed_by, placement.frozen)
+
+
+def top_folders(root):
+    """The visible folders at the top of the vault, apart from the dump and _groups."""
+    names = (path.name for path in root.iterdir() if path.is_dir())
+    return sorted(name for name in names if name[0] not in "._")
 
 
 class CappedBackend(FakeBackend):
@@ -251,16 +260,20 @@ def test_a_folder_added_with_its_group_note_by_hand_is_a_group(root):
 
 
 def test_a_group_renamed_by_hand_keeps_its_files_and_their_labels(root):
-    """Renaming the group note in Obsidian is a rename, not a delete: nothing goes to Unsorted."""
+    """Renaming the group note in Obsidian is a rename, not a delete: nothing goes to Unsorted.
+
+    The old folder is set aside, and sync puts each note in the folder of the new name.
+    """
     place(root, "a.txt", "hw")
     place(root, "b.txt", "hw")
     freeze(root, "b.txt")
     (root / "_groups" / "HW.md").rename(root / "_groups" / "Homework.md")
-    assert sync(root) == picked_up(set_version=4)
+    assert sync(root) == picked_up(rehomed=["a.txt", "b.txt"], set_version=4)
     assert state(root, "a.txt") == ("Homework", "hw", "jev", False)
     assert state(root, "b.txt") == ("Homework", "hw", "jev", True)
     assert labels(root) == [label("b.txt", "confirmed", "hw", "hw")]
-    assert not (root / "HW").exists()
+    assert top_folders(root) == ["Homework", "Logistics", "Project", "Unsorted"]
+    assert sync(root) == picked_up(set_version=4)
 
 
 def test_a_note_dragged_out_of_a_deleted_groups_folder_is_a_move(root):
@@ -331,7 +344,9 @@ def test_a_deleted_groups_notes_go_to_unsorted_and_lose_their_freeze(root):
     freeze(root, "elsewhere.txt")
     set_frozen_by_hand(root, "hand.txt")  # frozen by hand, and not synced before the delete
     vault.delete_group(root, "HW")
-    assert (root / "HW").is_dir()  # the folder stays while notes are in it
+    # The folder is set aside while notes are in it, so the name HW is free at once.
+    assert not (root / "HW").exists()
+    assert len(list((root / "HW (old)").iterdir())) == 4
 
     report = sync(root)
     assert report == picked_up(
@@ -341,7 +356,7 @@ def test_a_deleted_groups_notes_go_to_unsorted_and_lose_their_freeze(root):
         assert state(root, file_id) == ("Unsorted", None, "code", False)
         placement = note_of(root, file_id).placement
         assert (placement.close_call, placement.probs, placement.set_version) == (False, PROBS, 3)
-    assert list((root / "HW").iterdir()) == []
+    assert not (root / "HW (old)").exists()  # nothing is left in it, so it is removed
     # Only the two files that had a label get an "unfrozen" line.
     assert labels(root)[3:] == [
         label("confirmed.txt", "unfrozen", "hw", None, set_version=4),
@@ -356,13 +371,29 @@ def test_a_deleted_groups_notes_go_to_unsorted_and_lose_their_freeze(root):
     assert [request.file_id for request in backend.calls] == report.orphaned
 
 
-def test_a_note_in_a_folder_that_was_never_a_group_goes_to_unsorted_too(root):
-    """A folder without a group note is no group, whatever it is called."""
+def test_a_note_dragged_into_a_folder_that_is_no_group_is_put_back(root):
+    """A folder without a group note says nothing: the note goes back to its own group."""
     place(root, "a.txt", "hw")
+    place(root, "b.txt", None, reason="weak_top")
+    before = snapshot(root)
     drag(root, "a.txt", "Old stuff")
-    assert sync(root) == picked_up(orphaned=["a.txt"])
+    drag(root, "b.txt", "Old stuff")
+    assert sync(root) == picked_up(rehomed=["a.txt", "b.txt"])
+    assert state(root, "a.txt") == ("HW", "hw", "jev", False)
+    assert state(root, "b.txt") == ("Unsorted", None, "jev", False)
+    assert snapshot(root) == before  # the notes are back as they were, and nothing is logged
+    assert (root / "Old stuff").is_dir()  # the user's folder, so it stays
+
+
+def test_a_note_of_a_deleted_group_goes_to_unsorted_from_any_folder(root):
+    """The note's own group is gone, so no folder can keep it: Unsorted, wherever it sat."""
+    place(root, "a.txt", "hw")
+    freeze(root, "a.txt")
+    drag(root, "a.txt", "Old stuff")
+    vault.delete_group(root, "HW")
+    assert sync(root) == picked_up(orphaned=["a.txt"], set_version=4)
     assert state(root, "a.txt") == ("Unsorted", None, "code", False)
-    assert labels(root) == []
+    assert labels(root)[1:] == [label("a.txt", "unfrozen", "hw", None, set_version=4)]
 
 
 def test_a_renamed_group_takes_its_notes_along(root):
@@ -378,17 +409,15 @@ def test_a_renamed_group_takes_its_notes_along(root):
 # sync: the order of the rules
 
 
-def test_rule_1_wins_over_rule_2_a_note_dragged_into_a_folder_that_is_no_group(root):
-    """Dragged and frozen, but the folder is no group: Unsorted and unfrozen, with no move."""
+def test_a_frozen_note_dragged_into_a_folder_that_is_no_group_keeps_its_freeze(root):
+    """Dragged and frozen, but the folder is no group: no move, and no label is lost."""
     place(root, "a.txt", "hw")
     freeze(root, "a.txt")
     drag(root, "a.txt", "Old stuff")
-    assert sync(root) == picked_up(orphaned=["a.txt"])
-    assert state(root, "a.txt") == ("Unsorted", None, "code", False)
-    assert labels(root) == [
-        label("a.txt", "confirmed", "hw", "hw"),
-        label("a.txt", "unfrozen", "hw", None),
-    ]
+    assert sync(root) == picked_up(rehomed=["a.txt"])
+    assert state(root, "a.txt") == ("HW", "hw", "jev", True)
+    assert labels(root) == [label("a.txt", "confirmed", "hw", "hw")]
+    assert list(active_labels(root)) == ["a.txt"]
 
 
 def test_rule_2_wins_over_rule_3_a_note_dragged_and_frozen_by_hand(root):
@@ -477,7 +506,7 @@ def test_sync_reads_the_card_notes_once_however_many_it_rewrites(root, monkeypat
 
     monkeypatch.setattr(vault, "read_card_notes", counting)
     report = sync(root)
-    assert (len(report.moved), len(report.orphaned)) == (3, 3)
+    assert (len(report.moved), len(report.rehomed)) == (3, 3)
     assert len(reads) == 1
 
 
@@ -576,7 +605,7 @@ def test_sync_never_touches_the_originals(root):
         ]
 
     before = originals()
-    assert sync(root) == picked_up(moved=["a.txt"], confirmed=["hw3/b.py"], orphaned=["c.txt"])
+    assert sync(root) == picked_up(moved=["a.txt"], confirmed=["hw3/b.py"], rehomed=["c.txt"])
     assert originals() == before
 
 
@@ -1194,3 +1223,534 @@ def test_an_exact_move_takes_ids_only(root):
     assert state(root, "notes/a.txt") == ("Logistics", "logistics", "you", True)
     move_file(root, "notes/a.txt", None, exact=True)
     assert state(root, "notes/a.txt") == ("Unsorted", None, "you", True)
+
+
+def test_suggest_stops_when_the_call_log_cannot_be_written(root):
+    """A failure about the run, not about one file, ends the run as the spend cap does."""
+    for file_id in ("a.txt", "b.txt", "c.txt"):
+        frozen_in(root, file_id, "hw")
+
+    class NoLog(FakeBackend):
+        """A fake whose second call finds that the log cannot be written."""
+
+        def sort(self, request):
+            """Answer the first request, then fail the way JevBackend does for its log."""
+            if self.calls:
+                raise LogFailed("the call log cannot be written: disk full")
+            return super().sort(request)
+
+    backend = NoLog(default=TO_LOGISTICS)
+    failed = {}
+    found = suggest(root, backend, failed)
+    assert [item.file_id for item in found] == ["a.txt"]
+    assert failed == {"b.txt": "the call log cannot be written: disk full"}  # c.txt was not tried
+
+
+# Group notes renamed or deleted by hand, and folders that are no group's
+
+
+def two_groups(tmp_path):
+    """A vault with Homework (hw1, hw2) and Exams (exam1, exam2); hw2 and exam2 are confirmed."""
+    vault.init_vault(tmp_path)
+    vault.add_group(tmp_path, "Homework", "homework specs and solutions")
+    vault.add_group(tmp_path, "Exams", "exams and their solutions")
+    for file_id, group_id in (
+        ("hw1.txt", "homework"),
+        ("hw2.txt", "homework"),
+        ("exam1.txt", "exams"),
+        ("exam2.txt", "exams"),
+    ):
+        place(tmp_path, file_id, group_id, set_version=2)
+    freeze(tmp_path, "hw2.txt")
+    freeze(tmp_path, "exam2.txt")
+    return tmp_path
+
+
+def where(root):
+    """Each file's folder, group, who placed it and whether it is frozen."""
+    return {note.placement.file_id: state(root, note.placement.file_id) for note in notes_of(root)}
+
+
+def notes_of(root):
+    """Every card note in the vault."""
+    return vault.read_card_notes(root)
+
+
+def kinds(root):
+    """Every label line as (file id, kind, from group, to group)."""
+    return [
+        (line["file_id"], line["kind"], line["from_group"], line["to_group"])
+        for line in labels(root)
+    ]
+
+
+CONFIRMED = [
+    ("hw2.txt", "confirmed", "homework", "homework"),
+    ("exam2.txt", "confirmed", "exams", "exams"),
+]
+
+
+def settled(root):
+    """Check that the vault is at rest: a second sync finds nothing, and the board agrees."""
+    report = sync(root)
+    assert report == picked_up(set_version=report.set_version)
+    board = build_board(root)
+    on_board = {file.file_id: column.group.id for column in board.groups for file in column.files}
+    on_board.update({file.file_id: None for file in board.unsorted})
+    assert on_board == {note.placement.file_id: note.placement.group_id for note in notes_of(root)}
+    for note in notes_of(root):
+        assert note.path.parent == vault.folder_for(root, note.placement.group_id)
+        assert note.placement.frozen == (note.placement.file_id in active_labels(root))
+
+
+def test_one_group_note_renamed_by_hand(tmp_path):
+    """Homework.md becomes Problem sets.md in Obsidian: the group's files follow, labels stay."""
+    root = two_groups(tmp_path)
+    (root / "_groups" / "Homework.md").rename(root / "_groups" / "Problem sets.md")
+    report = sync(root)
+    assert (report.rehomed, report.moved, report.orphaned) == (["hw1.txt", "hw2.txt"], [], [])
+    assert where(root) == {
+        "exam1.txt": ("Exams", "exams", "jev", False),
+        "exam2.txt": ("Exams", "exams", "jev", True),
+        "hw1.txt": ("Problem sets", "homework", "jev", False),
+        "hw2.txt": ("Problem sets", "homework", "jev", True),
+    }
+    assert kinds(root) == CONFIRMED
+    assert top_folders(root) == ["Exams", "Problem sets", "Unsorted"]
+    settled(root)
+
+
+@pytest.mark.parametrize(
+    ("renames", "folders"),
+    [
+        ([("Exams", "Tests"), ("Homework", "Exams")], {"exams": "Tests", "homework": "Exams"}),
+        (
+            [("Homework", "Problem sets"), ("Exams", "Homework")],
+            {"exams": "Homework", "homework": "Problem sets"},
+        ),
+        (
+            [("Exams", "tmp"), ("Homework", "Exams"), ("tmp", "Homework")],
+            {"exams": "Homework", "homework": "Exams"},
+        ),
+    ],
+    ids=["a chain", "a chain, the other way", "a swap"],
+)
+def test_group_notes_renamed_by_hand_in_a_chain_or_a_swap(tmp_path, renames, folders):
+    """One group takes the name another just gave up: each keeps its own files and labels.
+
+    No folder is merged into another, so no file is read as moved by the user.
+    """
+    root = two_groups(tmp_path)
+    for old, new in renames:
+        (root / "_groups" / f"{old}.md").rename(root / "_groups" / f"{new}.md")
+    report = sync(root)
+    assert report.rehomed == ["exam1.txt", "exam2.txt", "hw1.txt", "hw2.txt"]
+    assert (report.moved, report.orphaned, report.confirmed, report.unfrozen) == ([], [], [], [])
+    assert where(root) == {
+        "exam1.txt": (folders["exams"], "exams", "jev", False),
+        "exam2.txt": (folders["exams"], "exams", "jev", True),
+        "hw1.txt": (folders["homework"], "homework", "jev", False),
+        "hw2.txt": (folders["homework"], "homework", "jev", True),
+    }
+    assert kinds(root) == CONFIRMED
+    assert top_folders(root) == sorted([*folders.values(), "Unsorted"])
+    settled(root)
+
+
+def test_a_chain_with_one_rename_by_hand_and_one_by_command(tmp_path):
+    """Exams.md is renamed in Obsidian, then `p0 group rename Homework Exams` takes the name."""
+    root = two_groups(tmp_path)
+    (root / "_groups" / "Exams.md").rename(root / "_groups" / "Tests.md")
+    vault.rename_group(root, "Homework", "Exams")
+    report = sync(root)
+    assert (report.rehomed, report.moved) == (["exam1.txt", "exam2.txt"], [])
+    assert where(root)["exam2.txt"] == ("Tests", "exams", "jev", True)
+    assert where(root)["hw2.txt"] == ("Exams", "homework", "jev", True)
+    assert kinds(root) == CONFIRMED
+    settled(root)
+
+
+@pytest.mark.parametrize("by_hand", [False, True], ids=["with commands", "by hand in Obsidian"])
+def test_a_group_deleted_and_its_name_taken_by_a_rename_before_any_sync(tmp_path, by_hand):
+    """Exams is deleted and Homework renamed to Exams. The old Exams files are not Homework's.
+
+    They go to Unsorted and lose their labels, as after any delete. They are never read as
+    files the user moved into the group that now has the name.
+    """
+    root = two_groups(tmp_path)
+    if by_hand:
+        (root / "_groups" / "Exams.md").unlink()
+        (root / "_groups" / "Homework.md").rename(root / "_groups" / "Exams.md")
+    else:
+        vault.delete_group(root, "Exams")
+        vault.rename_group(root, "Homework", "Exams")
+    report = sync(root)
+    assert (report.orphaned, report.moved) == (["exam1.txt", "exam2.txt"], [])
+    assert report.rehomed == (["hw1.txt", "hw2.txt"] if by_hand else [])
+    assert where(root) == {
+        "exam1.txt": ("Unsorted", None, "code", False),
+        "exam2.txt": ("Unsorted", None, "code", False),
+        "hw1.txt": ("Exams", "homework", "jev", False),
+        "hw2.txt": ("Exams", "homework", "jev", True),
+    }
+    assert kinds(root) == [*CONFIRMED, ("exam2.txt", "unfrozen", "exams", None)]
+    assert top_folders(root) == ["Exams", "Unsorted"]
+    settled(root)
+
+
+def test_a_group_deleted_and_added_again_under_a_new_id(tmp_path):
+    """HW was renamed to Homework, deleted, and Homework added again: a new group, a new id."""
+    root = two_groups(tmp_path)  # the group Homework has the id homework
+    vault.rename_group(root, "Homework", "Problem sets")
+    vault.delete_group(root, "Problem sets")
+    vault.add_group(root, "Problem sets", "problem sets")  # its id is problem-sets
+    report = sync(root)
+    assert (report.orphaned, report.moved, report.rehomed) == (["hw1.txt", "hw2.txt"], [], [])
+    assert where(root)["hw2.txt"] == ("Unsorted", None, "code", False)
+    assert kinds(root) == [*CONFIRMED, ("hw2.txt", "unfrozen", "homework", None)]
+    assert top_folders(root) == ["Exams", "Problem sets", "Unsorted"]
+    settled(root)
+
+
+def test_a_group_id_edited_by_hand_under_the_same_name(tmp_path):
+    """`id: homework` becomes `id: hw` in the note: to the tool, one group went and one came.
+
+    The files of the old id go to Unsorted. They are not read as moved to the new id.
+    """
+    root = two_groups(tmp_path)
+    note = root / "_groups" / "Homework.md"
+    text = note.read_text(encoding="utf-8")
+    assert "id: homework\n" in text
+    note.write_text(text.replace("id: homework\n", "id: hw\n"), encoding="utf-8")
+    report = sync(root)
+    assert (report.orphaned, report.moved) == (["hw1.txt", "hw2.txt"], [])
+    assert where(root)["hw1.txt"] == ("Unsorted", None, "code", False)
+    assert where(root)["hw2.txt"] == ("Unsorted", None, "code", False)
+    assert kinds(root) == [*CONFIRMED, ("hw2.txt", "unfrozen", "homework", None)]
+    assert [group.id for group in vault.read_groups(root)] == ["exams", "hw"]
+    settled(root)
+
+
+def test_a_group_deleted_and_added_again_in_other_capitals(root):
+    """Delete HW, add Hw: one folder on a Mac. Nothing loops, and no correction is undone."""
+    place(root, "hw1.txt", "hw")
+    place(root, "hw2.txt", "hw")
+    freeze(root, "hw2.txt")
+    vault.delete_group(root, "HW")
+    vault.add_group(root, "Hw", "homework again")  # the id is hw again
+    assert sync(root).rehomed == ["hw1.txt", "hw2.txt"]
+    assert state(root, "hw1.txt") == ("Hw", "hw", "jev", False)
+    assert state(root, "hw2.txt") == ("Hw", "hw", "jev", True)
+    assert "Hw" in top_folders(root)
+    assert "HW" not in top_folders(root)
+    settled(root)
+
+    # A sort places a file in it, and the next sync and sort leave it there.
+    drop(root, "hw3.txt")
+    to_hw = ({"hw": 0.9, "logistics": 0.05, "project": 0.05}, 0.95)
+    sort_vault(root, FakeBackend(default=to_hw))
+    assert state(root, "hw3.txt") == ("Hw", "hw", "jev", False)
+    settled(root)
+    move_file(root, "hw1.txt", "Hw")
+    assert state(root, "hw1.txt") == ("Hw", "hw", "jev", True)
+    settled(root)
+    assert list(active_labels(root)) == ["hw2.txt", "hw1.txt"]
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        ("HW", "hw"),
+        ("HW", "Hw"),
+        ("HW", "Homework"),
+        ("Übungen", "ÜBUNGEN"),
+        ("Übungen", unicodedata.normalize("NFD", "Übungen")),
+    ],
+    ids=["small letters", "other capitals", "another name", "capitals, not ASCII", "NFD"],
+)
+def test_a_group_folder_renamed_by_hand(root, old, new):
+    """The folder gets another name or spelling in the file explorer. The group note stays.
+
+    Every file is still in its group afterwards, and no label is lost.
+    """
+    vault.add_group(root, "Übungen", "exercises")
+    for group_id in ("hw", "übungen"):
+        place(root, f"{group_id}1.txt", group_id)
+        place(root, f"{group_id}2.txt", group_id)
+        freeze(root, f"{group_id}2.txt")
+    (root / old).rename(root / new)
+    report = sync(root)
+    assert (report.orphaned, report.moved, report.unfrozen, report.confirmed) == ([], [], [], [])
+    for group_id, folder in (("hw", "HW"), ("übungen", "Übungen")):
+        for number, frozen in ((1, False), (2, True)):
+            on_disk, in_group, placed_by, is_frozen = state(root, f"{group_id}{number}.txt")
+            assert (in_group, placed_by, is_frozen) == (group_id, "jev", frozen)
+            assert vault.folder_key(on_disk) == vault.folder_key(folder)
+    assert len(labels(root)) == 2
+    assert sorted(active_labels(root)) == ["hw2.txt", "übungen2.txt"]
+    settled_by_key(root)
+
+
+def settled_by_key(root):
+    """Like settled, for a vault whose folder may be spelled otherwise than its group."""
+    report = sync(root)
+    assert not any(
+        [report.moved, report.confirmed, report.unfrozen, report.orphaned, report.rehomed]
+    )
+    board = build_board(root)
+    on_board = {file.file_id: column.group.id for column in board.groups for file in column.files}
+    assert on_board == {note.placement.file_id: note.placement.group_id for note in notes_of(root)}
+    assert board.unsorted == []
+
+
+def test_a_note_dragged_from_a_set_aside_folder_into_a_group_is_a_move(root):
+    """The user rescues a file of a deleted group by hand: that is a move, as from any folder."""
+    place(root, "a.txt", "hw")
+    place(root, "b.txt", "hw")
+    vault.delete_group(root, "HW")
+    assert note_of(root, "a.txt").folder == "HW (old)"
+    drag(root, "a.txt", "Logistics")
+    assert sync(root) == picked_up(moved=["a.txt"], orphaned=["b.txt"], set_version=4)
+    assert state(root, "a.txt") == ("Logistics", "logistics", "you", True)
+    assert not (root / "HW (old)").exists()
+
+
+def test_a_set_aside_folder_goes_once_nothing_is_left_in_it(root):
+    """Empty, or with only the Finder's .DS_Store: removed. With a file of the user's: kept."""
+    place(root, "a.txt", "hw")
+    place(root, "b.txt", "project")
+    (root / "HW" / ".DS_Store").write_bytes(b"Finder")
+    (root / "Project" / "my notes.md").write_text("Things to remember.\n", encoding="utf-8")
+    (root / "Notes (old)").mkdir()  # a folder of the user's that happens to look like one
+    (root / "Notes (old)" / "keep.md").write_text("mine\n", encoding="utf-8")
+    vault.delete_group(root, "HW")
+    vault.delete_group(root, "Project")
+    assert top_folders(root) == [
+        "HW (old)",
+        "Logistics",
+        "Notes (old)",
+        "Project (old)",
+        "Unsorted",
+    ]
+    assert sync(root).orphaned == ["a.txt", "b.txt"]
+    assert top_folders(root) == ["Logistics", "Notes (old)", "Project (old)", "Unsorted"]
+    assert [path.name for path in (root / "Project (old)").iterdir()] == ["my notes.md"]
+    assert (root / "Notes (old)" / "keep.md").read_text(encoding="utf-8") == "mine\n"
+
+
+def test_a_note_put_back_in_its_group_has_its_frozen_flag_checked_in_the_same_sync(root):
+    """Rehomed and frozen by hand: confirmed at once, so the next sync has nothing left to do."""
+    place(root, "a.txt", "hw")
+    place(root, "b.txt", "hw")
+    freeze(root, "b.txt")
+    set_frozen_by_hand(root, "a.txt")
+    set_frozen_by_hand(root, "b.txt", False)
+    (root / "_groups" / "HW.md").rename(root / "_groups" / "Homework.md")
+    assert sync(root) == picked_up(
+        rehomed=["a.txt", "b.txt"], confirmed=["a.txt"], unfrozen=["b.txt"], set_version=4
+    )
+    assert state(root, "a.txt") == ("Homework", "hw", "jev", True)
+    assert state(root, "b.txt") == ("Homework", "hw", "jev", False)
+    assert labels(root)[1:] == [
+        label("a.txt", "confirmed", "hw", "hw", set_version=4),
+        label("b.txt", "unfrozen", "hw", "hw", set_version=4),
+    ]
+    assert sync(root) == picked_up(set_version=4)
+
+
+def test_a_confirmed_file_in_unsorted_dragged_into_a_folder_that_is_no_group_goes_back(root):
+    """Its own place is Unsorted, which is always there: it is put back, label and all."""
+    place(root, "a.txt", "hw")
+    move_file(root, "a.txt", "Unsorted")
+    drag(root, "a.txt", "Old stuff")
+    assert sync(root) == picked_up(rehomed=["a.txt"])
+    assert state(root, "a.txt") == ("Unsorted", None, "you", True)
+    assert labels(root) == [label("a.txt", "moved", "hw", None)]
+
+
+# Card notes that Obsidian touched
+
+
+def add_property(root, file_id, line="tags: [review]"):
+    """Add one frontmatter key to a file's card note by hand."""
+    path = note_of(root, file_id).path
+    text = path.read_text(encoding="utf-8")
+    path.write_text(text.replace("\n---\n", f"\n{line}\n---\n", 1), encoding="utf-8")
+
+
+def test_a_property_added_by_hand_survives_every_correction(root):
+    """Freeze, unfreeze, move and a drag picked up by sync all keep the user's own keys."""
+    place(root, "a.txt", "hw")
+    add_property(root, "a.txt")
+    assert sync(root) == picked_up()
+    freeze(root, "a.txt")
+    assert note_of(root, "a.txt").extras == {"tags": ["review"]}
+    unfreeze(root, "a.txt")
+    assert note_of(root, "a.txt").extras == {"tags": ["review"]}
+    move_file(root, "a.txt", "Logistics")
+    assert note_of(root, "a.txt").extras == {"tags": ["review"]}
+    drag(root, "a.txt", "Project")
+    assert sync(root).moved == ["a.txt"]
+    note = note_of(root, "a.txt")
+    assert (note.folder, note.placement.group_id, note.extras) == (
+        "Project",
+        "project",
+        {"tags": ["review"]},
+    )
+    frontmatter, _ = vault.read_note(note.path)
+    assert list(frontmatter) == [*Placement.model_fields, "tags"]
+    assert [line["kind"] for line in labels(root)] == ["confirmed", "unfrozen", "moved", "moved"]
+
+
+def test_a_note_filed_into_a_folder_inside_its_group_is_left_there_by_sync(root):
+    """HW/week 3 is HW: nothing to pick up. A freeze rewrites the note where it is."""
+    place(root, "a.txt", "hw")
+    path = note_of(root, "a.txt").path
+    (root / "HW" / "week 3").mkdir()
+    nested = path.rename(root / "HW" / "week 3" / path.name)
+    assert sync(root) == picked_up()
+    assert freeze(root, "HW") == ["a.txt"]
+    note = note_of(root, "a.txt")
+    assert (note.path, note.folder, note.placement.frozen) == (nested, "HW", True)
+    # Filed into another group's folder, it is a drag like any other.
+    (root / "Logistics" / "later").mkdir()
+    nested.rename(root / "Logistics" / "later" / nested.name)
+    assert sync(root).moved == ["a.txt"]
+    assert note_of(root, "a.txt").path == root / "Logistics" / "a.txt.md"
+
+
+# A freeze given after the original changed
+
+
+def changed_original(root, file_id, group_id="hw"):
+    """Place a file, then replace its original, as an edit after the sort does."""
+    place(root, file_id, group_id)
+    path = drop(root, file_id, "# Syllabus\n\nGrading, deadlines and office hours.\n")
+    return hash_file(path), render_card(build_card(path, file_id, Config.load(root)))
+
+
+def test_a_move_after_the_original_changed_covers_the_new_content(root):
+    """The note takes the hash and card of the file as it is now, so the next sort skips it."""
+    new_hash, new_card = changed_original(root, "sheet.txt", "logistics")
+    old_hash = note_of(root, "sheet.txt").placement.content_hash
+    placement = move_file(root, "sheet.txt", "HW")
+    note = note_of(root, "sheet.txt")
+    assert note.placement == placement
+    assert (placement.content_hash, placement.file_type) == (new_hash, "Text")
+    assert placement.content_hash != old_hash
+    assert note.body == new_card
+    assert (placement.probs, placement.set_version, placement.model) == (PROBS, 3, "fake-0")
+
+    backend = FakeBackend(default=TO_LOGISTICS)
+    report = sort_vault(root, backend)
+    assert (report.frozen_skipped, backend.calls) == (1, [])
+    assert state(root, "sheet.txt") == ("HW", "hw", "you", True)
+    assert labels(root) == [label("sheet.txt", "moved", "logistics", "hw")]
+
+    # A change after the move still takes the freeze off.
+    drop(root, "sheet.txt", "Homework 9: something new.\n")
+    report = sort_vault(root, FakeBackend(default=TO_LOGISTICS))
+    assert (report.frozen_skipped, report.asked) == (0, 1)
+    assert state(root, "sheet.txt") == ("Logistics", "logistics", "jev", False)
+    assert labels(root)[1:] == [label("sheet.txt", "unfrozen", "hw", "hw")]
+
+
+def test_a_freeze_after_the_original_changed_covers_the_new_content(root):
+    """By command for a file and for a group, and for a move to the group the file is in."""
+    new = {file_id: changed_original(root, file_id) for file_id in ("a.txt", "b.txt", "c.txt")}
+    place(root, "same.txt", "hw")
+    untouched = note_of(root, "same.txt").path.read_bytes()
+    assert freeze(root, "a.txt") == ["a.txt"]
+    assert move_file(root, "b.txt", "HW").content_hash == new["b.txt"][0]
+    assert freeze(root, "HW") == ["c.txt", "same.txt"]
+    for file_id, (new_hash, new_card) in new.items():
+        note = note_of(root, file_id)
+        assert (note.placement.content_hash, note.body) == (new_hash, new_card)
+        assert (note.placement.frozen, note.placement.placed_by) == (True, "jev")
+    # A file that did not change gets its flag and nothing else.
+    assert note_of(root, "same.txt").path.read_bytes() == untouched.replace(
+        b"frozen: false", b"frozen: true"
+    )
+    backend = FakeBackend(default=TO_LOGISTICS)
+    assert sort_vault(root, backend).frozen_skipped == 4
+    assert backend.calls == []
+    assert [line["kind"] for line in labels(root)] == ["confirmed"] * 4
+
+
+def test_a_drag_or_a_flag_set_by_hand_after_the_original_changed_covers_it_too(root):
+    """Sync rules 2 and 3 freeze a note as the commands do: for the file as it is now."""
+    dragged_hash, dragged_card = changed_original(root, "dragged.txt")
+    frozen_hash, frozen_card = changed_original(root, "frozen.txt")
+    drag(root, "dragged.txt", "Logistics")
+    set_frozen_by_hand(root, "frozen.txt")
+    assert sync(root) == picked_up(moved=["dragged.txt"], confirmed=["frozen.txt"])
+    dragged, frozen = note_of(root, "dragged.txt"), note_of(root, "frozen.txt")
+    assert (dragged.placement.content_hash, dragged.body) == (dragged_hash, dragged_card)
+    assert (frozen.placement.content_hash, frozen.body) == (frozen_hash, frozen_card)
+    assert state(root, "frozen.txt") == ("HW", "hw", "jev", True)
+    assert sync(root) == picked_up()
+    backend = FakeBackend(default=TO_HW)
+    assert sort_vault(root, backend).frozen_skipped == 2
+    assert backend.calls == []
+
+
+def test_a_freeze_keeps_the_notes_values_when_the_original_cannot_be_read(root, monkeypatch):
+    """No hash can be taken, so the note keeps the one it has. The freeze is still given."""
+    place(root, "a.txt", "hw")
+    drop(root, "a.txt", "New content.\n")
+    old = note_of(root, "a.txt")
+
+    def unreadable(path):
+        """Stand in for hash_file: the original cannot be opened."""
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr("decide_already.corrections.hash_file", unreadable)
+    assert freeze(root, "a.txt") == ["a.txt"]
+    note = note_of(root, "a.txt")
+    assert note.placement == old.placement.model_copy(update={"frozen": True})
+    assert note.body == old.body
+    assert labels(root) == [label("a.txt", "confirmed", "hw", "hw")]
+
+
+def test_notes_filed_into_a_folder_of_a_group_renamed_by_hand_come_along(root):
+    """HW/week 3 held a note when HW.md was renamed: the note goes to the new folder too.
+
+    The set-aside folder is removed once only the empty week 3 folder is left in it.
+    """
+    place(root, "a.txt", "hw")
+    place(root, "b.txt", "hw")
+    freeze(root, "b.txt")
+    (root / "HW" / "week 3").mkdir()
+    for file_id in ("a.txt", "b.txt"):
+        path = note_of(root, file_id).path
+        path.rename(root / "HW" / "week 3" / path.name)
+    (root / "_groups" / "HW.md").rename(root / "_groups" / "Homework.md")
+    assert sync(root) == picked_up(rehomed=["a.txt", "b.txt"], set_version=4)
+    assert note_of(root, "a.txt").path == root / "Homework" / "a.txt.md"
+    assert state(root, "b.txt") == ("Homework", "hw", "jev", True)
+    assert top_folders(root) == ["Homework", "Logistics", "Project", "Unsorted"]
+    assert labels(root) == [label("b.txt", "confirmed", "hw", "hw")]
+
+
+def test_unfreezing_a_labeled_file_without_a_note_goes_by_its_exact_id(root):
+    """Another sorted file has the same name: the id that was typed is the one that counts."""
+    place(root, "notes.txt", "hw")
+    place(root, "week1/notes.txt", "hw")
+    place(root, "Logistics", "hw")  # a file named like a group
+    for file_id in ("notes.txt", "week1/notes.txt", "Logistics"):
+        freeze(root, file_id, kind="file")
+    note_of(root, "notes.txt").path.unlink()
+    note_of(root, "Logistics").path.unlink()
+
+    assert unfreeze(root, "notes.txt") == ["notes.txt"]
+    assert state(root, "week1/notes.txt") == ("HW", "hw", "jev", True)  # not this one
+    assert labels(root)[3:] == [
+        label("notes.txt", "unfrozen", "hw", "hw", jev_probs=None, jev_set_version=None)
+    ]
+    # On the command line a group wins over a file of the same name, as for any unfreeze.
+    assert unfreeze(root, "Logistics") == []
+    assert unfreeze(root, "Logistics", kind="group") == []
+    assert unfreeze(root, "Logistics", kind="file") == ["Logistics"]
+    assert sorted(active_labels(root)) == ["week1/notes.txt"]
+    assert unfreeze(root, "week1/notes.txt") == ["week1/notes.txt"]
+    assert active_labels(root) == {}
