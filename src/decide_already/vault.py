@@ -2,6 +2,7 @@
 
 import os
 import re
+import unicodedata
 from pathlib import Path
 
 import yaml
@@ -60,6 +61,15 @@ def write_note(path: Path, frontmatter: dict, body: str = "") -> None:
     """Write a markdown note: the frontmatter between --- lines, then the body."""
     front = yaml.safe_dump(frontmatter, sort_keys=False, allow_unicode=True)
     path.write_text(f"---\n{front}---\n{body}", encoding="utf-8")
+
+
+def folder_key(name: str) -> str:
+    """A folder name as the file system may compare it: one Unicode form, capitals ignored.
+
+    On a Mac, HW and hw are one folder. Two names with the same key are treated as the same
+    folder everywhere, so the tool behaves the same on every file system.
+    """
+    return unicodedata.normalize("NFC", name).casefold()
 
 
 def slugify(name: str) -> str:

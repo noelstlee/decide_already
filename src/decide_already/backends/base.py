@@ -36,8 +36,16 @@ class BackendError(Exception):
     """The backend could not produce an answer. A failure is never treated as an answer."""
 
 
-class BudgetExceeded(BackendError):
+class RunStopped(BackendError):
+    """A failure that is about the run, not about one file: no further request may be sent."""
+
+
+class BudgetExceeded(RunStopped):
     """The vault's spend cap was reached, so no request was sent."""
+
+
+class LogFailed(RunStopped):
+    """The call log cannot be written. Every call must be logged, so the run stops."""
 
 
 class Backend(Protocol):

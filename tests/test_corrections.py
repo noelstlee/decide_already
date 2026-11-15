@@ -1160,3 +1160,37 @@ def test_suggest_reports_an_unknown_variant_in_the_config(root):
     with pytest.raises(ValueError, match="unknown variant 'cards'"):
         suggest(root, backend)
     assert backend.calls == []
+
+
+def test_a_file_named_like_a_group_can_be_frozen_on_its_own_by_kind(root):
+    """The page says what it names, so a file called HW is never read as the group HW."""
+    place(root, "HW", "hw")
+    place(root, "a.txt", "hw")
+    assert freeze(root, "HW", kind="file") == ["HW"]
+    assert state(root, "a.txt") == ("HW", "hw", "jev", False)
+    assert unfreeze(root, "HW", kind="file") == ["HW"]
+    assert freeze(root, "hw", kind="group") == ["HW", "a.txt"]
+
+
+def test_kind_refuses_a_reference_of_the_other_kind(root):
+    """With a kind, a file is matched by its id only, and a group is never read as a file."""
+    place(root, "notes/a.txt", "hw")
+    with pytest.raises(ValueError, match="no sorted file with the id 'a.txt'"):
+        freeze(root, "a.txt", kind="file")
+    with pytest.raises(ValueError, match="no group with the id or name 'notes/a.txt'"):
+        unfreeze(root, "notes/a.txt", kind="group")
+    assert labels(root) == []
+
+
+def test_an_exact_move_takes_ids_only(root):
+    """With exact, a name that only another file has is not enough, and neither is a group name."""
+    place(root, "notes/a.txt", "hw")
+    with pytest.raises(ValueError, match="no sorted file with the id 'a.txt'"):
+        move_file(root, "a.txt", "logistics", exact=True)
+    with pytest.raises(ValueError, match="no group with the id or name 'Logistics'"):
+        move_file(root, "notes/a.txt", "Logistics", exact=True)
+    assert labels(root) == []
+    move_file(root, "notes/a.txt", "logistics", exact=True)
+    assert state(root, "notes/a.txt") == ("Logistics", "logistics", "you", True)
+    move_file(root, "notes/a.txt", None, exact=True)
+    assert state(root, "notes/a.txt") == ("Unsorted", None, "you", True)

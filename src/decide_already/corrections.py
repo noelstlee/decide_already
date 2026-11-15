@@ -12,6 +12,7 @@ vault as it is now, with whatever was dragged or edited in Obsidian since the la
 
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 
 from . import vault
 from .backends.base import Backend, BackendError, BudgetExceeded
@@ -21,6 +22,9 @@ from .log import append_jsonl, read_jsonl
 from .sort import decide, judge
 from .types import Group, Label, Placement, StrictModel, Suggestion
 from .vault import CardNote
+
+# What a freeze or unfreeze reference names, when the caller knows (the page always does).
+RefKind = Literal["file", "group"]
 
 
 class SyncReport(StrictModel):
@@ -173,15 +177,24 @@ def _find_note(notes: dict[str, CardNote], ref: str, what: str = "sorted file") 
     )
 
 
-def _selected(root: Path, ref: str) -> list[CardNote]:
+def _selected(root: Path, ref: str, kind: RefKind | None = None) -> list[CardNote]:
     """The card notes a freeze or unfreeze is about: every note of a group, or one file's note.
 
-    A reference that names a group, or Unsorted, wins over a file of the same name.
+    `kind` says what the reference names. "file": a file id, matched exactly and never read
+    as a group. "group": a group id or name, or Unsorted, and never read as a file. None is
+    the command line's reading: a group, or Unsorted, wins over a file of the same name, and
+    a file may be given by a name that only one file has.
     """
     notes = _notes_by_file(vault.read_card_notes(root))
     groups = _group_refs(vault.read_groups(root))
+    if kind == "file":
+        if ref not in notes:
+            raise ValueError(f"no sorted file with the id {ref!r}")
+        return [notes[ref]]
     if ref in groups:
         return [note for note in notes.values() if note.placement.group_id == groups[ref]]
+    if kind == "group":
+        raise ValueError(f"no group with the id or name {ref!r}")
     return [_find_note(notes, ref, "group or sorted file")]
 
 
@@ -246,11 +259,15 @@ def sync(root: Path) -> SyncReport:
     return report
 
 
-def move_file(root: Path, file_ref: str, group_ref: str | None) -> Placement:
+def move_file(
+    root: Path, file_ref: str, group_ref: str | None, *, exact: bool = False
+) -> Placement:
     """Put a file in a group yourself, and freeze it there. Returns the note's new frontmatter.
 
     `file_ref` is a file id, or a file name that only one sorted file has. `group_ref` is a
     group id or name; None or "Unsorted" means Unsorted, for a file that fits no group.
+    With `exact` (the page uses it), the file is matched by its id only and the group by
+    its id only, so a file can never be mistaken for another one of the same name.
     The note moves to the group's folder, says the user placed it, and "moved" is written.
     A file that is already in that group is not moved: it is frozen where it is, and
     "confirmed" is written unless it already has an active label. Raises ValueError for a
@@ -258,9 +275,12 @@ def move_file(root: Path, file_ref: str, group_ref: str | None) -> Placement:
     """
     set_version = sync(root).set_version
     notes = vault.read_card_notes(root)
-    note = _find_note(_notes_by_file(notes), file_ref)
+    by_file = _notes_by_file(notes)
+    if exact and file_ref not in by_file:
+        raise ValueError(f"no sorted file with the id {file_ref!r}")
+    note = by_file[file_ref] if exact else _find_note(by_file, file_ref)
     groups = vault.read_groups(root)
-    refs = _group_refs(groups)
+    refs = {group.id: group.id for group in groups} if exact else _group_refs(groups)
     if group_ref is not None and group_ref not in refs:
         names = ", ".join([*(group.name for group in groups), UNSORTED_DIR])
         raise ValueError(f"no group with the id or name {group_ref!r}; pick one of: {names}")
@@ -271,10 +291,11 @@ def move_file(root: Path, file_ref: str, group_ref: str | None) -> Placement:
     return _changed(note.placement, frozen=True)
 
 
-def freeze(root: Path, ref: str) -> list[str]:
+def freeze(root: Path, ref: str, *, kind: RefKind | None = None) -> list[str]:
     """Freeze a file, or every file in a group, so that reruns leave it where it is.
 
     `ref` is a group id or name (or "Unsorted"), or else a file id or unique file name.
+    `kind` settles which, for a caller that knows (see `_selected`).
     Each note gets frozen: true, and "confirmed" is written for it with its current group.
     A file that is already frozen and has an active label is left as it is. Returns the ids
     of the files it froze. Raises ValueError for a reference that names nothing.
@@ -282,13 +303,13 @@ def freeze(root: Path, ref: str) -> list[str]:
     set_version = sync(root).set_version
     active = active_labels(root)
     frozen = []
-    for note in _selected(root, ref):
+    for note in _selected(root, ref, kind):
         if _freeze_note(root, note, note.placement.file_id in active, set_version):
             frozen.append(note.placement.file_id)
     return frozen
 
 
-def unfreeze(root: Path, ref: str) -> list[str]:
+def unfreeze(root: Path, ref: str, *, kind: RefKind | None = None) -> list[str]:
     """Unfreeze a file, or every file in a group, so that the next rerun sorts it again.
 
     `ref` is read as in `freeze`. Each frozen note gets frozen: false, and "unfrozen" is
@@ -297,7 +318,7 @@ def unfreeze(root: Path, ref: str) -> list[str]:
     """
     set_version = sync(root).set_version
     unfrozen = []
-    for note in _selected(root, ref):
+    for note in _selected(root, ref, kind):
         if note.placement.frozen:
             unfreeze_note(root, note, set_version)
             unfrozen.append(note.placement.file_id)
