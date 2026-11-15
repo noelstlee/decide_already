@@ -595,6 +595,34 @@ def dump_files(root: Path, config: Config) -> list[tuple[str, Path]]:
     return sorted(files)
 
 
+def delete_original(root: Path, file_id: str) -> int:
+    """Delete one file from the dump folder for good, with its card note. The one place the
+    tool removes an original, and only when the user asks for that file by its id.
+
+    The file is matched by its exact id in the dump listing, never joined to a path, so
+    nothing outside the dump folder can be named. A link in the dump is removed as a link;
+    what it points to stays. Folders inside the dump that are left with nothing in them go
+    too (the dump folder itself never does). Labels in .decide/labels.jsonl stay: they are
+    the record of what the user decided. Returns how many card notes were removed.
+    Raises FileNotFoundError for an id that is not a file in the dump folder.
+    """
+    config = Config.load(root)
+    paths = dict(dump_files(root, config))
+    if file_id not in paths:
+        raise FileNotFoundError(f"no file with the id {file_id!r} in the dump folder")
+    path = paths[file_id]
+    notes = [note for note in read_card_notes(root) if note.placement.file_id == file_id]
+    path.unlink()  # first: when this fails, nothing has changed
+    for note in notes:
+        note.path.unlink(missing_ok=True)
+    dump = root / config.dump_dir
+    folder = path.parent
+    while folder != dump and dump in folder.parents and _is_empty(folder):
+        _remove_folder(folder)
+        folder = folder.parent
+    return len(notes)
+
+
 def note_name(file_id: str) -> str:
     """The file name of a file's card note: the file id with "/" written as "__", plus ".md"."""
     return file_id.replace("/", "__") + ".md"

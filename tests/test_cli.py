@@ -997,3 +997,19 @@ def test_a_labeled_file_whose_note_is_gone_is_reported_and_unfreeze_is_the_way_o
         ("moved", "week1/sheet.txt", "logistics", "hw"),
         ("unfrozen", "week1/sheet.txt", "hw", "hw"),
     ]
+
+
+def test_remove_asks_first_and_deletes_only_on_yes(root):
+    """p0 remove deletes an original for good, so it asks, unless --yes is given."""
+    drop(root, "a.txt")
+    vault = ["--vault", str(root)]
+    result = runner.invoke(app, ["remove", "a.txt", *vault], input="n\n")
+    assert result.exit_code == 1
+    assert (root / "_dump" / "a.txt").exists()
+    result = runner.invoke(app, ["remove", "a.txt", *vault], input="y\n")
+    assert result.exit_code == 0, result.output
+    assert "Deleted a.txt." in result.output
+    assert not (root / "_dump" / "a.txt").exists()
+    result = runner.invoke(app, ["remove", "a.txt", "--yes", *vault])
+    assert result.exit_code == 1
+    assert "error: no file with the id 'a.txt'" in result.output

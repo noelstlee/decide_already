@@ -876,3 +876,198 @@ textarea {
     transition: none !important;
   }
 }
+
+/* The switch between the board and the Files view, in the header. */
+
+.views {
+  display: inline-flex;
+  margin-right: 8px;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--lane);
+}
+
+.view {
+  appearance: none;
+  padding: 4px 14px;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.view:hover {
+  color: var(--text);
+}
+
+.view.current {
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 1px 2px rgba(20, 26, 40, 0.12);
+}
+
+/* The Files view: the dump folder as a tree. */
+
+.files {
+  flex: 1;
+  min-height: 0;
+  margin: 0 24px 24px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.files-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 12px;
+  padding: 14px 18px 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.files-head h2 {
+  font-family: var(--mono);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.files-sum {
+  color: var(--muted);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.files-note {
+  flex-basis: 100%;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.tree {
+  padding: 6px 0 10px;
+  list-style: none;
+}
+
+.tree-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 36px;
+  padding-right: 18px;
+}
+
+.tree-row.file:hover,
+.tree-row.confirming {
+  background: var(--accent-soft);
+}
+
+.folder-toggle {
+  appearance: none;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-left: 12px;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.chevron {
+  width: 10px;
+  color: var(--muted);
+}
+
+.folder-name {
+  font-family: var(--mono);
+  font-weight: 600;
+}
+
+.folder-count {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.file-info {
+  display: flex;
+  align-items: baseline;
+  gap: 4px 14px;
+  min-width: 0;
+  margin-left: 18px;
+}
+
+.file-name {
+  font-family: var(--mono);
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.file-size {
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.file-where {
+  padding: 1px 8px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.file-where.new {
+  border-style: dashed;
+}
+
+.file-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 18px;
+}
+
+.confirm-text {
+  color: var(--text);
+  font-size: 13px;
+}
+
+/* The one button that removes the user's own file. */
+.button.danger {
+  border-color: #b3261e;
+  background: #b3261e;
+  color: #ffffff;
+  font-weight: 600;
+}
+
+.button.danger:hover {
+  border-color: #8c1d18;
+  background: #8c1d18;
+}
+
+@media (prefers-color-scheme: dark) {
+  .button.danger {
+    border-color: #f2b8b5;
+    background: #f2b8b5;
+    color: #3a0907;
+  }
+
+  .button.danger:hover {
+    border-color: #f9dedc;
+    background: #f9dedc;
+  }
+}

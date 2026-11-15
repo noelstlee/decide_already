@@ -613,6 +613,101 @@ def test_path_that_leaves_the_dump_is_not_found(client, root, path):
     assert is_error(client.get(f"/api/original/{absolute.as_posix().lstrip('/')}"), 404)
 
 
+# GET /api/dump and DELETE /api/dump/{file_id}
+
+
+def test_dump_listing_gives_every_file_with_its_size(client, root):
+    """The Files view lists what is on disk: every file id, its size and when it changed."""
+    listing = client.get("/api/dump").json()
+    assert listing["dump_dir"] == "_dump"
+    sizes = {entry["file_id"]: entry["size"] for entry in listing["files"]}
+    assert sizes == {
+        **{file_id: len(text.encode("utf-8")) for file_id, text in TEXTS.items()},
+        SCAN: len(SCAN_BYTES),
+    }
+    assert all(isinstance(entry["modified"], float) for entry in listing["files"])
+
+
+def test_delete_removes_the_original_and_its_card_note(client, root):
+    """Deleting a sorted file takes it out of the dump and off the board. Labels stay."""
+    sort_now(client)
+    moved = client.post("/api/move", json={"file_id": SHEET, "group_id": "logistics"})
+    assert moved.status_code == 200
+    answer = client.delete(f"/api/dump/{SHEET}")
+    assert answer.status_code == 200
+    assert answer.json() == {"deleted": SHEET, "card_notes_removed": 1}
+    assert not (root / "_dump" / SHEET).exists()
+    assert not any(path.name == vault.note_name(SHEET) for path in root.rglob("*.md"))
+    board = client.get("/api/board").json()
+    on_board = [
+        f["file_id"]
+        for f in [*board["unsorted"], *(f for g in board["groups"] for f in g["files"])]
+    ]
+    assert SHEET not in on_board
+    assert SHEET not in board["new_files"]
+    assert labels(root) == [("moved", SHEET, "project", "logistics")]  # the record stays
+    assert (root / "_dump" / EXAMPLES).exists()  # the folder still holds the other file
+
+
+def test_delete_removes_folders_it_leaves_empty(client, root):
+    """A folder of the dump that only held the deleted file goes too; the dump folder stays."""
+    assert client.delete(f"/api/dump/{SOLUTION}").status_code == 200
+    assert not (root / "_dump" / "hw3").exists()
+    for file_id in [CHECKLIST, EXAMPLES, SHEET, SCAN, SYLLABUS]:
+        assert client.delete(f"/api/dump/{file_id}").status_code == 200
+    assert (root / "_dump").is_dir()
+    assert list((root / "_dump").iterdir()) == []
+
+
+def test_delete_of_a_file_never_sorted(client, root):
+    """A file with no card note yet is deleted all the same."""
+    answer = client.delete(f"/api/dump/{SYLLABUS}")
+    assert answer.json() == {"deleted": SYLLABUS, "card_notes_removed": 0}
+    assert not (root / "_dump" / SYLLABUS).exists()
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/dump/nope.txt",
+        "/api/dump/%2e%2e/secret.txt",
+        "/api/dump/%2e%2e/.decide/config.yaml",
+        "/api/dump/%2e%2e/_groups/HW.md",
+        "/api/dump/.hidden/secret.txt",
+        "/api/dump/hw3",
+    ],
+)
+def test_delete_reaches_nothing_but_a_file_of_the_dump(client, root, path):
+    """Only an id from the dump listing can be deleted: nothing above it, hidden in it, or a folder."""
+    (root / "secret.txt").write_text("not for the page", encoding="utf-8")
+    drop(root, ".hidden/secret.txt", "hidden files are skipped")
+    before = tree(root)
+    assert is_error(client.delete(path), 404)
+    assert tree(root) == before
+
+
+def test_delete_of_a_link_removes_the_link_only(client, root, tmp_path):
+    """A link in the dump is removed as a link; the file it points to stays."""
+    outside = tmp_path / "elsewhere.txt"
+    outside.write_text("keep me", encoding="utf-8")
+    (root / "_dump" / "link.txt").symlink_to(outside)
+    assert client.delete("/api/dump/link.txt").status_code == 200
+    assert not (root / "_dump" / "link.txt").is_symlink()
+    assert outside.read_text(encoding="utf-8") == "keep me"
+
+
+def test_delete_is_refused_while_a_sort_runs(root):
+    """The sort read the dump at its start, so nothing is deleted under it."""
+    backend = HoldingBackend(hold=SHEET, answers=dict(ANSWERS))
+    client = TestClient(create_app(root, lambda: backend), base_url=BASE_URL)
+    assert client.post("/api/sort").status_code == 202
+    assert backend.reached.wait(timeout=10)
+    assert is_error(client.delete(f"/api/dump/{SYLLABUS}"), 409)
+    assert (root / "_dump" / SYLLABUS).exists()
+    backend.release.set()
+    wait_for_sort(client)
+
+
 # POST /api/move, /api/freeze and /api/unfreeze
 
 
@@ -2105,6 +2200,71 @@ def test_page_adds_the_files_picked_with_the_add_files_button():
         "sent": ["PUT /api/dump/a.txt", "PUT /api/dump/b.pdf"],
         "cleared": "",
         "toasts": ["Added 2 files to the dump folder. Press Sort to place them."],
+    }
+
+
+@needs_node
+def test_page_shows_the_dump_folder_as_a_tree_and_deletes_after_a_yes():
+    """Files lists every file by folder with where it is sorted; Delete asks before it acts."""
+    result = run_page(
+        """
+        server.board.new_files = ["notes/week 1/new.md"];
+        server.dump = {
+          dump_dir: "_dump",
+          files: [
+            { file_id: "hw3/solution.py", size: 2048, modified: 1 },
+            { file_id: "notes/week 1/new.md", size: 10, modified: 1 },
+            { file_id: "scan.txt", size: 5, modified: 1 },
+          ],
+        };
+        browser.routes["GET /api/dump"] = () => ok(server.dump);
+        browser.routes["DELETE /api/dump/hw3/solution.py"] = () => {
+          server.dump.files = server.dump.files.filter((f) => f.file_id !== "hw3/solution.py");
+          server.board.groups[0].files = [];
+          return ok({ deleted: "hw3/solution.py", card_notes_removed: 1 });
+        };
+        browser.press("view:files");
+        await browser.settle();
+        const rows = () =>
+          document.querySelectorAll(".tree-row").map((row) =>
+            [".folder-name", ".file-name", ".file-where"]
+              .flatMap((name) => row.querySelectorAll(name))
+              .map((n) => n.textContent),
+          );
+        const shown = rows();
+        browser.press("folder:notes/");
+        const folded = rows();
+        browser.press("remove:hw3/solution.py");
+        const asked = [browser.count("DELETE /api/dump/hw3/solution.py"),
+          document.querySelector(".confirm-text").textContent];
+        browser.press("remove-yes:hw3/solution.py");
+        await browser.settle();
+        browser.done({
+          shown,
+          folded,
+          asked,
+          deletes: browser.count("DELETE /api/dump/hw3/solution.py"),
+          after: rows(),
+          toasts: browser.toasts(),
+          pressed: document.getElementById("view-files").attrs.get("aria-pressed"),
+        });
+        """
+    )
+    assert result == {
+        "shown": [
+            ["hw3/"],
+            ["solution.py", "HW"],
+            ["notes/"],
+            ["week 1/"],
+            ["new.md", "Not sorted yet"],
+            ["scan.txt", "Unsorted"],
+        ],
+        "folded": [["hw3/"], ["solution.py", "HW"], ["notes/"], ["scan.txt", "Unsorted"]],
+        "asked": [0, "Delete for good? This cannot be undone."],
+        "deletes": 1,
+        "after": [["notes/"], ["scan.txt", "Unsorted"]],
+        "toasts": ["Deleted hw3/solution.py."],
+        "pressed": "true",
     }
 
 

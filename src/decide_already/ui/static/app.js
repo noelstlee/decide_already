@@ -9,6 +9,10 @@
 
 const state = {
   board: null, // the last answer of GET /api/board
+  view: "board", // what fills the page: "board" (the lanes) or "files" (the dump folder)
+  dump: null, // the last answer of GET /api/dump, loaded while the Files view is shown
+  closedFolders: new Set(), // folders of the dump folder that are folded shut in the Files view
+  confirmRemove: null, // id of the file whose delete is waiting for a yes in the Files view
   loadError: null, // why the board could not be loaded, when it could not
   selected: null, // id of the file that is open in the side panel
   detail: null, // the last answer of GET /api/files/<selected>
@@ -189,6 +193,7 @@ async function refresh() {
   const ticket = ++state.ticket;
   const selected = state.selected;
   const board = await api("GET", "/api/board");
+  const dump = state.view === "files" ? await api("GET", "/api/dump") : null;
   let detail = null;
   let gone = "it is no longer on the board";
   if (selected) {
@@ -199,6 +204,7 @@ async function refresh() {
   }
   if (ticket !== state.ticket) return;
   state.board = board;
+  if (dump) state.dump = dump; // kept while the board shows, so Files opens without a gap
   state.loadError = null;
   if (state.selected === selected) {
     state.detail = detail;
@@ -319,6 +325,12 @@ function renderHeader() {
     : plural(waiting, "new file");
   $("add-group").disabled = !board || sorting();
   $("add-files").disabled = !board; // uploads are fine during a sort: it does not see them
+  $("views").hidden = !board;
+  for (const view of ["board", "files"]) {
+    const tab = $(`view-${view}`);
+    tab.setAttribute("aria-pressed", String(state.view === view));
+    tab.className = cls("view", state.view === view && "current");
+  }
   renderSortButton();
 }
 
@@ -352,6 +364,11 @@ function renderBoard() {
     root.replaceChildren(state.loadError ? loadFailed() : waitingNote);
     return;
   }
+  if (state.view === "files") {
+    const problems = ["sort", "drop"].map(problemList).filter(Boolean);
+    root.replaceChildren(...problems, filesView());
+    return;
+  }
   const lanes = [];
   const showUnsorted = board.groups.length > 0 || board.unsorted.length > 0;
   if (showUnsorted) lanes.push(unsortedLane(board.unsorted));
@@ -370,6 +387,204 @@ function renderBoard() {
     ...(notice ? [el("p", { class: "notice" }, notice)] : []),
     el("div", { class: "lanes", "data-scroll": "lanes" }, lanes),
   );
+}
+
+// The Files view
+
+// Show the board or the files, and load what the Files view needs.
+function setView(view) {
+  if (view === state.view) return;
+  state.view = view;
+  state.confirmRemove = null;
+  render();
+  load();
+}
+
+// A size in bytes, in the unit that reads best.
+function bytes(size) {
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+// The dump folder as a tree: {folders: Map of name to tree, files: [entry]}, from file ids.
+function dumpTree(files) {
+  const root = { folders: new Map(), files: [] };
+  for (const file of files) {
+    const parts = file.file_id.split("/");
+    let node = root;
+    for (const part of parts.slice(0, -1)) {
+      if (!node.folders.has(part)) node.folders.set(part, { folders: new Map(), files: [] });
+      node = node.folders.get(part);
+    }
+    node.files.push({ ...file, name: parts[parts.length - 1] });
+  }
+  return root;
+}
+
+// How many files sit in a folder of the tree, the folders inside it counted too.
+function treeCount(node) {
+  let count = node.files.length;
+  for (const child of node.folders.values()) count += treeCount(child);
+  return count;
+}
+
+// The Files view: every file in the dump folder, by folder, with where it is sorted and a way
+// to open it or delete it.
+function filesView() {
+  const listing = state.dump;
+  if (!listing) return el("p", { class: "quiet-note" }, "Loading");
+  const sorted = new Map(allFiles().map((file) => [file.file_id, file]));
+  const total = listing.files.reduce((sum, file) => sum + file.size, 0);
+  const rows = [];
+  treeRows(dumpTree(listing.files), "", 0, sorted, rows);
+  const head = el(
+    "header",
+    { class: "files-head" },
+    el("h2", {}, `${listing.dump_dir}/`),
+    el("span", { class: "files-sum" }, `${plural(listing.files.length, "file")}, ${bytes(total)}`),
+    el(
+      "p",
+      { class: "files-note" },
+      "The files the model sorts. Add files with Add files or by dropping them on the page. " +
+        "Delete removes a file from the vault for good, with its card.",
+    ),
+  );
+  const body = rows.length
+    ? el("ul", { class: "tree" }, rows)
+    : el("p", { class: "empty" }, "The dump folder is empty.");
+  return el(
+    "section",
+    { class: "files", "aria-label": "Files in the dump folder", "data-scroll": "files" },
+    head,
+    body,
+  );
+}
+
+// The rows of one folder of the tree, folders first, each indented by its depth. A folded
+// folder shows its own row only.
+function treeRows(node, prefix, depth, sorted, rows) {
+  const names = [...node.folders.keys()].sort((a, b) => a.localeCompare(b));
+  for (const name of names) {
+    const path = `${prefix}${name}/`;
+    const child = node.folders.get(name);
+    const open = !state.closedFolders.has(path);
+    const toggle = () => {
+      if (open) state.closedFolders.add(path);
+      else state.closedFolders.delete(path);
+      render();
+    };
+    const row = el(
+      "li",
+      { class: "tree-row folder" },
+      el(
+        "button",
+        {
+          type: "button",
+          class: "folder-toggle",
+          "aria-expanded": String(open),
+          "data-key": `folder:${path}`,
+          onclick: toggle,
+        },
+        el("span", { class: "chevron", "aria-hidden": "true" }, open ? "\u25BE" : "\u25B8"),
+        el("span", { class: "folder-name" }, `${name}/`),
+        el("span", { class: "folder-count" }, plural(treeCount(child), "file")),
+      ),
+    );
+    row.style.paddingLeft = `${depth * 22}px`;
+    rows.push(row);
+    if (open) treeRows(child, path, depth + 1, sorted, rows);
+  }
+  const files = [...node.files].sort((a, b) => a.name.localeCompare(b.name));
+  for (const file of files) rows.push(fileRow(file, depth, sorted.get(file.file_id)));
+}
+
+// One file of the Files view: its name and size, where it is sorted, and what can be done.
+function fileRow(file, depth, onBoard) {
+  let where = "Not sorted yet";
+  if (onBoard) where = groupName(onBoard.group_id) + (onBoard.frozen ? ", frozen" : "");
+  const confirming = state.confirmRemove === file.file_id;
+  const row = el(
+    "li",
+    { class: cls("tree-row", "file", confirming && "confirming") },
+    el(
+      "div",
+      { class: "file-info" },
+      el("span", { class: "file-name", title: file.file_id }, breakable(file.name)),
+      el("span", { class: "file-size" }, bytes(file.size)),
+      el("span", { class: cls("file-where", !onBoard && "new") }, where),
+    ),
+    confirming ? removeConfirm(file) : fileActions(file, onBoard),
+  );
+  row.style.paddingLeft = `${depth * 22 + 22}px`;
+  return row;
+}
+
+// Show the card, open the original, delete.
+function fileActions(file, onBoard) {
+  const quiet = (key, extra = {}) => ({ class: "button quiet", "data-key": key, ...extra });
+  return el(
+    "div",
+    { class: "file-actions" },
+    onBoard && button("Show card", () => openFile(file.file_id), quiet(`card-of:${file.file_id}`)),
+    el(
+      "a",
+      {
+        ...quiet(`open:${file.file_id}`),
+        href: `/api/original/${filePath(file.file_id)}`,
+        target: "_blank",
+        rel: "noopener",
+      },
+      "Open",
+    ),
+    button(
+      "Delete",
+      () => {
+        state.confirmRemove = file.file_id;
+        render();
+        focusKey(`remove-keep:${file.file_id}`);
+      },
+      quiet(`remove:${file.file_id}`, {
+        disabled: sorting(),
+        title: sorting() ? "Not while a sort runs" : "Delete this file from the vault",
+      }),
+    ),
+  );
+}
+
+// The question before a delete. Keep has the focus, so Enter does not delete by accident.
+function removeConfirm(file) {
+  const keep = () => {
+    state.confirmRemove = null;
+    render();
+    focusKey(`remove:${file.file_id}`);
+  };
+  return el(
+    "div",
+    { class: "file-actions confirm-remove", role: "group", "aria-label": "Delete this file?" },
+    el("span", { class: "confirm-text" }, "Delete for good? This cannot be undone."),
+    button("Delete", () => removeFile(file.file_id), {
+      class: "button danger",
+      disabled: sorting(),
+      "data-key": `remove-yes:${file.file_id}`,
+    }),
+    button("Keep", keep, { "data-key": `remove-keep:${file.file_id}` }),
+  );
+}
+
+// Delete a file from the dump folder, with its card note, then load the page again.
+async function removeFile(fileId) {
+  await once(`remove:${fileId}`, async () => {
+    const done = await act(`${fileId} was not deleted`, async () => {
+      await api("DELETE", `/api/dump/${filePath(fileId)}`);
+    });
+    state.confirmRemove = null;
+    if (done) {
+      if (state.selected === fileId) state.selected = null;
+      toast(`Deleted ${fileId}.`);
+    }
+    await load();
+  });
 }
 
 // A list of things that went wrong, above the lanes: a headline, then every file with its
@@ -1330,13 +1545,20 @@ function watchPresses() {
 function onEscape(event) {
   if (event.key !== "Escape") return;
   if (!$("drop-overlay").hidden) $("drop-overlay").hidden = true;
-  else if (state.selected) closePanel();
+  else if (state.confirmRemove) {
+    const fileId = state.confirmRemove;
+    state.confirmRemove = null;
+    render();
+    focusKey(`remove:${fileId}`);
+  } else if (state.selected) closePanel();
 }
 
 // Wire up the parts of the page that never change, then load the board.
 function start() {
   $("sort").addEventListener("click", startSort);
   $("add-group").addEventListener("click", () => openForm(null));
+  $("view-board").addEventListener("click", () => setView("board"));
+  $("view-files").addEventListener("click", () => setView("files"));
   document.addEventListener("keydown", onEscape);
   window.addEventListener("focus", refreshOnReturn);
   watchPresses();

@@ -601,6 +601,29 @@ def create_app(root: Path, backend_factory: Callable[[], Backend] | None = None)
             part.unlink(missing_ok=True)
         return {"file_id": name}
 
+    @app.get("/api/dump")
+    def dump_listing() -> dict:
+        """Every file in the dump folder, by id, with its size and when it last changed.
+
+        Where each file is sorted comes from the board; this adds what only the disk knows.
+        """
+        with lock:
+            config = Config.load(root)
+            files = []
+            for file_id, path in vault.dump_files(root, config):
+                stat = path.stat()
+                files.append({"file_id": file_id, "size": stat.st_size, "modified": stat.st_mtime})
+            return {"dump_dir": config.dump_dir, "files": files}
+
+    @app.delete("/api/dump/{file_id:path}")
+    def delete_from_dump(file_id: str) -> dict:
+        """Delete one file from the dump folder for good, with its card note. 404 for an id
+        that is not a file there, 409 while a sort runs."""
+        with changing():
+            dump_path(file_id)
+            removed = vault.delete_original(root, file_id)
+        return {"deleted": file_id, "card_notes_removed": removed}
+
     @app.post("/api/suggest")
     def suggest() -> dict:
         """Ask the model about every frozen file, and list the ones it would now place elsewhere.

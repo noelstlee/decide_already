@@ -609,3 +609,29 @@ def test_unchanged_tells_whether_a_note_is_as_it_was_read(root):
     vault.write_note(rewritten.path, {"frozen": True}, "written by the tool\n")
     assert not vault.unchanged(rewritten)
     assert vault.unchanged(vault.restamp(rewritten))
+
+
+def test_delete_original_removes_the_file_its_card_note_and_empty_folders(tmp_path):
+    """The one way the tool deletes an original: by exact id, with its note; labels stay."""
+    vault.init_vault(tmp_path)
+    vault.add_group(tmp_path, "HW", "homework")
+    original = tmp_path / "_dump" / "hw3" / "a.txt"
+    original.parent.mkdir()
+    original.write_text("homework three", encoding="utf-8")
+    placement = Placement(
+        source="[[_dump/hw3/a.txt]]",
+        file_id="hw3/a.txt",
+        content_hash="0" * 64,
+        file_type="Text",
+        group_id="hw",
+        placed_by="jev",
+        set_version=1,
+    )
+    note = vault.write_card_note(tmp_path, placement, "a card\n")
+    assert vault.delete_original(tmp_path, "hw3/a.txt") == 1
+    assert not original.exists()
+    assert not note.exists()
+    assert not (tmp_path / "_dump" / "hw3").exists()
+    assert (tmp_path / "_dump").is_dir()
+    with pytest.raises(FileNotFoundError, match="no file with the id 'hw3/a.txt'"):
+        vault.delete_original(tmp_path, "hw3/a.txt")

@@ -299,6 +299,26 @@ def suggest_moves(vault_path: VaultOption = None) -> None:
         raise typer.Exit(code=1)
 
 
+@app.command("remove")
+def remove_file(
+    file: Annotated[str, typer.Argument(help="File id: its path inside the dump folder.")],
+    yes: Annotated[bool, typer.Option("--yes", help="Do not ask before deleting.")] = False,
+    vault_path: VaultOption = None,
+) -> None:
+    """Delete a file from the dump folder for good, with its card note. Labels stay."""
+    root = _vault_root(vault_path)
+    if not yes and not typer.confirm(
+        f"Delete {file} from the dump folder? This cannot be undone.", default=False
+    ):
+        _fail("nothing was deleted")
+    try:
+        removed = vault.delete_original(root, file)
+    except (ValueError, OSError) as error:
+        _fail(str(error))
+    note = " and its card note" if removed else ""
+    typer.echo(f"Deleted {file}{note}.")
+
+
 @app.command("sync")
 def sync_edits(vault_path: VaultOption = None) -> None:
     """Pick up edits made by hand: notes dragged to another folder, frozen flags, group notes."""
