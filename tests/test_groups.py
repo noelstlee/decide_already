@@ -133,3 +133,58 @@ def test_an_empty_vault_has_no_set_version_yet(root):
     assert result.groups == []
     assert list((root / ".decide" / "sets").iterdir()) == []
     assert vault.add_group(root, "HW", "homework").version == 1
+
+
+def test_a_group_note_renamed_by_hand_takes_its_folder_along(root):
+    vault.add_group(root, "HW", "homework")
+    (root / "HW" / "hw1.pdf.md").write_text("a card note", encoding="utf-8")
+    (root / "_groups" / "HW.md").rename(root / "_groups" / "Homework.md")
+    result = vault.sync_group_set(root)
+    assert (result.version, result.groups[0].id, result.groups[0].name) == (2, "hw", "Homework")
+    assert (root / "Homework" / "hw1.pdf.md").read_text(encoding="utf-8") == "a card note"
+    assert not (root / "HW").exists()
+
+
+def test_a_rename_onto_a_leftover_folder_moves_the_files_into_it(root):
+    vault.add_group(root, "HW", "homework")
+    (root / "HW" / "hw1.pdf.md").write_text("a card note", encoding="utf-8")
+    (root / "Old").mkdir()  # as a deleted group leaves it
+    (root / "Old" / "mine.md").write_text("my own note", encoding="utf-8")
+    vault.rename_group(root, "HW", "Old")
+    assert sorted(path.name for path in (root / "Old").iterdir()) == ["hw1.pdf.md", "mine.md"]
+    assert not (root / "HW").exists()
+
+
+def test_a_rename_never_writes_over_a_file_in_the_other_folder(root):
+    vault.add_group(root, "HW", "homework")
+    (root / "HW" / "notes.md").write_text("from HW", encoding="utf-8")
+    (root / "Old").mkdir()
+    (root / "Old" / "notes.md").write_text("already here", encoding="utf-8")
+    with pytest.raises(FileExistsError, match="notes.md"):
+        vault.rename_group(root, "HW", "Old")
+    assert (root / "HW" / "notes.md").read_text(encoding="utf-8") == "from HW"
+    assert (root / "Old" / "notes.md").read_text(encoding="utf-8") == "already here"
+
+
+def test_a_rename_that_only_changes_the_case(root):
+    vault.add_group(root, "HW", "homework")
+    (root / "HW" / "hw1.pdf.md").write_text("a card note", encoding="utf-8")
+    result = vault.rename_group(root, "HW", "Hw")
+    assert [(group.id, group.name) for group in result.groups] == [("hw", "Hw")]
+    assert [path.name for path in (root / "_groups").iterdir()] == ["Hw.md"]
+    assert "Hw" in [path.name for path in root.iterdir()]
+    assert "HW" not in [path.name for path in root.iterdir()]
+    assert (root / "Hw" / "hw1.pdf.md").exists()
+
+
+def test_two_groups_that_swap_names_by_hand_keep_their_folders(root):
+    vault.add_group(root, "A", "first")
+    vault.add_group(root, "B", "second")
+    (root / "A" / "a.md").write_text("in A", encoding="utf-8")
+    groups = root / "_groups"
+    (groups / "A.md").rename(groups / "tmp.md")
+    (groups / "B.md").rename(groups / "A.md")
+    (groups / "tmp.md").rename(groups / "B.md")
+    result = vault.sync_group_set(root)
+    assert {group.id: group.name for group in result.groups} == {"a": "B", "b": "A"}
+    assert (root / "A" / "a.md").exists()
