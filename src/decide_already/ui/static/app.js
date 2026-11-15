@@ -15,6 +15,10 @@ const state = {
   form: null, // the open group form: {id, name, covers, excludes, confirmDelete}
   sort: null, // the last answer of GET /api/sort/status
   watching: false, // true while this page follows a running sort
+  adding: 0, // how many dropped files are still on their way to the dump folder
+  // What went wrong and stays on the page until dismissed: {title, rows: [[file, reason]]}.
+  // `sort` is what the last sort could not do, `drop` the dropped files that were not added.
+  problems: { sort: null, drop: null },
   dragging: null, // id of the file whose card is being dragged
   moving: null, // id of a file whose move the server has not answered yet
   pressing: false, // true while a mouse button or a finger is down
@@ -22,7 +26,8 @@ const state = {
   ticket: 0, // counts refreshes, so that only the newest answer is drawn
 };
 
-const UNSORTED = "Unsorted"; // how the server names the Unsorted lane in a freeze
+const UNSORTED = "Unsorted"; // the name of the lane for files that are in no group
+const inFlight = new Set(); // the names of the requests that are not answered yet (see once)
 
 // The element with this id. The ids are the ones in index.html.
 const $ = (id) => document.getElementById(id);
@@ -114,13 +119,33 @@ function toast(message, kind = "info") {
   setTimeout(() => note.remove(), kind === "error" ? 10000 : 5000);
 }
 
-// Run one action. When it fails, say on the page what did not happen, and why.
+// Run one action. When it fails, say on the page what did not happen, and why. Gives back
+// whether it worked.
 async function act(lead, work) {
   try {
     await work();
+    return true;
   } catch (error) {
     toast(`${lead}: ${error.message}`, "error");
+    return false;
   }
+}
+
+// Run `work` unless the request of this name is still in flight: a second press on a button
+// whose first press the server has not answered yet does nothing.
+async function once(name, work) {
+  if (inFlight.has(name)) return;
+  inFlight.add(name);
+  try {
+    await work();
+  } finally {
+    inFlight.delete(name);
+  }
+}
+
+// "3 files were not sorted", "1 file was not added": the headline of a list of problems.
+function notDone(count, what) {
+  return `${plural(count, "file")} ${count === 1 ? "was" : "were"} not ${what}`;
 }
 
 // Looking things up on the board
@@ -158,19 +183,29 @@ function topGroup(file) {
 // Loading
 
 // Ask the server for the board, and for the open file, then redraw. When several of these
-// run at once, only the newest answer is drawn.
+// run at once, only the newest answer is drawn. When the open file can no longer be shown
+// (its original left the dump folder, say), the side panel closes and a message says why.
 async function refresh() {
   const ticket = ++state.ticket;
   const selected = state.selected;
   const board = await api("GET", "/api/board");
   let detail = null;
-  if (selected) detail = await api("GET", `/api/files/${filePath(selected)}`).catch(() => null);
+  let gone = "it is no longer on the board";
+  if (selected) {
+    detail = await api("GET", `/api/files/${filePath(selected)}`).catch((error) => {
+      gone = error.message;
+      return null;
+    });
+  }
   if (ticket !== state.ticket) return;
   state.board = board;
   state.loadError = null;
   if (state.selected === selected) {
     state.detail = detail;
-    if (!detail || !findFile(selected)) state.selected = null;
+    if (selected && (!detail || !findFile(selected))) {
+      state.selected = null;
+      toast(`The panel of ${selected} was closed: ${gone}`, "error");
+    }
   }
   if (board.sorting && !sorting()) state.sort = { running: true, done: 0, total: 0 };
   render();
@@ -277,13 +312,18 @@ function renderHeader() {
     $("meta-spend").textContent = `${money(vault.spent_usd)} of ${money(vault.max_spend_usd)}`;
   }
   const waiting = board ? board.new_files.length : 0;
-  $("pending").hidden = waiting === 0;
-  $("pending").textContent = plural(waiting, "new file");
+  const adding = state.adding > 0;
+  $("pending").hidden = waiting === 0 && !adding;
+  $("pending").textContent = adding
+    ? `Adding ${plural(state.adding, "file")}`
+    : plural(waiting, "new file");
   $("add-group").disabled = !board || sorting();
   renderSortButton();
 }
 
 // The Sort button. While a sort runs it shows how far the sort is and cannot be pressed.
+// It cannot be pressed while dropped files are still arriving either: a sort started then
+// would not see them.
 function renderSortButton() {
   const { done = 0, total = 0 } = state.sort || {};
   const running = sorting();
@@ -291,6 +331,7 @@ function renderSortButton() {
   let blocked = "";
   if (running) label = total ? `Sorting ${done} of ${total}` : "Sorting";
   else if (!state.board) blocked = "The board is not loaded.";
+  else if (state.adding > 0) blocked = "Files are still being added.";
   else if (state.board.groups.length === 0) blocked = "Add a group first.";
   else if (allFiles().length + state.board.new_files.length === 0) blocked = "Add files first.";
   $("sort-label").textContent = label;
@@ -317,14 +358,43 @@ function renderBoard() {
   if (state.form && state.form.id === null) {
     lanes.push(el("section", { class: "lane", "aria-label": "New group" }, groupForm()));
   }
+  const problems = ["sort", "drop"].map(problemList).filter(Boolean);
   if (lanes.length === 0) {
-    root.replaceChildren(firstGroupInvite());
+    root.replaceChildren(...problems, firstGroupInvite());
     return;
   }
   const notice = boardNotice();
   root.replaceChildren(
+    ...problems,
     ...(notice ? [el("p", { class: "notice" }, notice)] : []),
     el("div", { class: "lanes", "data-scroll": "lanes" }, lanes),
+  );
+}
+
+// A list of things that went wrong, above the lanes: a headline, then every file with its
+// reason. Unlike a message it stays until it is dismissed (or, for a sort, until the next
+// sort). `kind` is its name in state.problems. Null when there is nothing to list.
+function problemList(kind) {
+  const list = state.problems[kind];
+  if (!list) return null;
+  const dismiss = () => {
+    state.problems[kind] = null;
+    render();
+    focusKey("sort");
+  };
+  const rows = list.rows.map(([file, reason]) =>
+    el("li", {}, file && el("span", { class: "problem-file" }, `${file}: `), reason),
+  );
+  return el(
+    "section",
+    { class: "problems", "aria-label": list.title },
+    el(
+      "div",
+      { class: "problems-head" },
+      el("h2", {}, list.title),
+      button("Dismiss", dismiss, { class: "button quiet", "data-key": `dismiss:${kind}` }),
+    ),
+    el("ul", { class: "problems-list", "data-scroll": `problems:${kind}` }, rows),
   );
 }
 
@@ -438,6 +508,7 @@ function laneTitle(name, count) {
 
 // The quiet buttons under a lane's description: edit the group, freeze or unfreeze its files.
 function laneActions(group, name, files) {
+  const groupId = group ? group.id : null; // null is the Unsorted lane, as in a move
   const ref = group ? group.id : UNSORTED;
   const allFrozen = files.length > 0 && files.every((file) => file.frozen);
   const quiet = (key) => ({ class: "button quiet", disabled: sorting(), "data-key": key });
@@ -448,7 +519,7 @@ function laneActions(group, name, files) {
     files.length > 0 &&
       button(
         allFrozen ? "Unfreeze all" : "Freeze all",
-        () => freezeLane(ref, name, !allFrozen),
+        () => freezeLane(groupId, name, !allFrozen),
         quiet(`freeze:${ref}`),
       ),
   );
@@ -672,9 +743,12 @@ function keepGroup() {
   focusKey("form:delete");
 }
 
-// Save the form: add the new group, or send what changed in an existing one.
+// Save the form: add the new group, or send what changed in an existing one. A second press
+// while the first is not answered does nothing. When the server refuses, the board is loaded
+// again, which also shows a sort that is running (the usual reason for a refusal).
 async function saveGroup() {
   const form = state.form;
+  if (!form) return; // pressed again after the save went through, before the form was redrawn
   const name = form.name.trim();
   const covers = form.covers.trim();
   const excludes = form.excludes.trim();
@@ -683,11 +757,15 @@ async function saveGroup() {
     focusKey(name ? "form:covers" : "form:name");
     return;
   }
-  await act("Not saved", async () => {
-    const id = form.id === null ? await addGroup(name, covers, excludes) : await changeGroup(form);
-    state.form = null;
-    await load();
-    focusKey(`edit:${id}`);
+  await once("group", async () => {
+    const saved = await act("Not saved", async () => {
+      const id =
+        form.id === null ? await addGroup(name, covers, excludes) : await changeGroup(form);
+      state.form = null;
+      await load();
+      focusKey(`edit:${id}`);
+    });
+    if (!saved) await load();
   });
 }
 
@@ -716,16 +794,21 @@ async function changeGroup(form) {
   return form.id;
 }
 
-// The answer was yes: delete the group. Its files go to Unsorted.
+// The answer was yes: delete the group. Its files go to Unsorted. A second press and a
+// refusal by the server are handled as in saveGroup.
 async function deleteGroup() {
+  if (!state.form) return;
   const id = state.form.id;
   const name = groupName(id);
-  await act("Not deleted", async () => {
-    await api("DELETE", `/api/groups/${encodeURIComponent(id)}`);
-    state.form = null;
-    toast(`Deleted ${name}. Any files it held are in Unsorted now.`);
-    await load();
-    focusKey("add-group");
+  await once("group", async () => {
+    const deleted = await act("Not deleted", async () => {
+      await api("DELETE", `/api/groups/${encodeURIComponent(id)}`);
+      state.form = null;
+      toast(`Deleted ${name}. Any files it held are in Unsorted now.`);
+      await load();
+      focusKey("add-group");
+    });
+    if (!deleted) await load();
   });
 }
 
@@ -967,20 +1050,22 @@ async function moveFile(fileId, groupId) {
   await load();
 }
 
-// Freeze or unfreeze one file.
+// Freeze or unfreeze one file. The request says that it names a file, so a file that is
+// called like a group is never taken for the group.
 async function freezeFile(file, frozen) {
   await act(frozen ? "Not frozen" : "Not unfrozen", async () => {
-    await api("POST", frozen ? "/api/freeze" : "/api/unfreeze", { ref: file.file_id });
+    await api("POST", frozen ? "/api/freeze" : "/api/unfreeze", { file_id: file.file_id });
     const then = frozen ? "Sorting leaves it where it is." : "The next sort decides again.";
     toast(`${frozen ? "Froze" : "Unfroze"} ${file.name}. ${then}`);
   });
   await load();
 }
 
-// Freeze or unfreeze every file in a lane.
-async function freezeLane(ref, name, frozen) {
+// Freeze or unfreeze every file in a lane: a group's by its id, the Unsorted lane by null.
+async function freezeLane(groupId, name, frozen) {
   await act(frozen ? "Not frozen" : "Not unfrozen", async () => {
-    const answer = await api("POST", frozen ? "/api/freeze" : "/api/unfreeze", { ref });
+    const body = { group_id: groupId };
+    const answer = await api("POST", frozen ? "/api/freeze" : "/api/unfreeze", body);
     const count = (frozen ? answer.frozen : answer.unfrozen).length;
     toast(`${frozen ? "Froze" : "Unfroze"} ${plural(count, "file")} in ${name}.`);
   });
@@ -989,20 +1074,30 @@ async function freezeLane(ref, name, frozen) {
 
 // Sorting
 
-// Start a sort on the server, then follow it.
+// Start a sort on the server, then follow it. A second press while the first is not
+// answered does nothing. When the server refuses, the board is loaded again: if the reason
+// is a sort that is already running (started in another tab, say), the page then follows it.
 async function startSort() {
-  await act("Sort not started", async () => {
-    state.sort = await api("POST", "/api/sort");
-    render();
+  if (sorting() || state.adding > 0) return; // the button may still show while a redraw waits
+  await once("sort", async () => {
+    const started = await act("Sort not started", async () => {
+      state.sort = await api("POST", "/api/sort");
+    });
+    if (!started) {
+      await load();
+      return;
+    }
     watchSort();
+    render();
   });
 }
 
 // Follow a running sort: show how far it is, let cards land as they are placed, and say how
-// it ended.
+// it ended. What the sort before it could not do is taken off the page.
 async function watchSort() {
   if (state.watching) return;
   state.watching = true;
+  state.problems.sort = null;
   let drawn = -1;
   try {
     for (;;) {
@@ -1016,7 +1111,9 @@ async function watchSort() {
       }
       await new Promise((resolve) => setTimeout(resolve, 500));
     }
-    await refresh();
+    // The sort is over. How it ended is said even when the board cannot be loaded just now:
+    // what stopped the sort (a group note that cannot be read, say) often stops the board too.
+    await load();
     reportSort(state.sort);
   } catch (error) {
     state.sort = null;
@@ -1027,10 +1124,14 @@ async function watchSort() {
   }
 }
 
-// Say how a sort ended: what it placed, and what it could not sort.
+// Say how a sort ended: what it placed, and what it could not sort. A message goes away by
+// itself, so the reason a sort stopped and every file that was not sorted are also put in a
+// list that stays above the board (see problemList).
 function reportSort(status) {
   if (status.error) {
+    state.problems.sort = { title: "The sort stopped", rows: [[null, status.error]] };
     toast(`The sort stopped: ${status.error}`, "error");
+    render();
     return;
   }
   const report = status.report;
@@ -1041,9 +1142,9 @@ function reportSort(status) {
   toast(`Sorted: ${parts.join(", ")}.`);
   const failed = Object.entries(report.errors);
   if (failed.length > 0) {
-    const [fileId, reason] = failed[0];
-    const more = failed.length > 1 ? ` (and ${failed.length - 1} more)` : "";
-    toast(`${plural(failed.length, "file")} not sorted. ${fileId}: ${reason}${more}`, "error");
+    state.problems.sort = { title: notDone(failed.length, "sorted"), rows: failed };
+    toast(`${notDone(failed.length, "sorted")}. The list is above the board.`, "error");
+    render();
   }
 }
 
@@ -1159,26 +1260,35 @@ function droppedFiles(transfer) {
   return { files: files.filter(Boolean), folders };
 }
 
-// Send dropped files to the dump folder one by one, then say how it went.
+// Send dropped files to the dump folder one by one, then say how it went. Sort cannot be
+// pressed meanwhile (see renderSortButton). Every file that was not added is put in a list
+// that stays above the board, with its reason (see problemList).
 async function addFiles({ files, folders }) {
-  const failures = [];
+  const failed = [];
   let added = 0;
+  if (state.adding === 0) state.problems.drop = null; // a new drop starts a new list
+  state.adding += files.length;
+  render();
   for (const file of files) {
     try {
       await api("PUT", `/api/dump/${encodeURIComponent(file.name)}`, file);
       added += 1;
     } catch (error) {
-      failures.push(error.message);
+      failed.push([file.name, error.message]);
     }
+    state.adding -= 1;
+    renderHeader();
   }
   if (added > 0) {
     const them = added === 1 ? "it" : "them";
     toast(`Added ${plural(added, "file")} to the dump folder. Press Sort to place ${them}.`);
   }
   if (folders > 0) toast("Folders are not added. Drop the files inside them.", "error");
-  if (failures.length > 0) {
-    const more = failures.length > 1 ? ` (and ${failures.length - 1} more)` : "";
-    toast(`Not added: ${failures[0]}${more}`, "error");
+  if (failed.length > 0) {
+    // Two drops can overlap, so the list is added to and not replaced.
+    const rows = [...(state.problems.drop ? state.problems.drop.rows : []), ...failed];
+    state.problems.drop = { title: notDone(rows.length, "added"), rows };
+    toast(`${notDone(failed.length, "added")}. The list is above the board.`, "error");
   }
   await load();
 }

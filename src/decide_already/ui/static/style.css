@@ -289,6 +289,50 @@ textarea {
   font-size: 14px;
 }
 
+/* What the last sort or the last drop could not do: a headline, then every file with its
+   reason. It stays until it is dismissed, so it is a solid box, apart from the dashed hints.
+   A long list scrolls inside the box and leaves the lanes their room. */
+.problems {
+  flex: none;
+  margin: 0 24px 14px;
+  padding: 10px 14px 12px;
+  border: 1px solid var(--edge);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.problems-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.problems h2 {
+  font-size: 14px;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.problems-list {
+  max-height: 24vh;
+  margin-top: 6px;
+  overflow-y: auto;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.problems-list li + li {
+  margin-top: 3px;
+}
+
+.problem-file {
+  color: var(--text);
+  font-weight: 600;
+}
+
 .quiet-note {
   padding: 24px;
   color: var(--muted);

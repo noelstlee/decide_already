@@ -6,15 +6,20 @@ is plain HTML, CSS and JS in static/. It is served from this machine only and lo
 from anywhere else.
 """
 
+import os
+import secrets
 import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.datastructures import MutableHeaders
+from starlette.requests import ClientDisconnect
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from .. import corrections, vault
 from ..backends import make_backend
@@ -28,14 +33,24 @@ from ..types import Group, GroupSet, StrictModel
 
 STATIC_DIR = Path(__file__).parent / "static"
 LOCAL_HOSTS = {"127.0.0.1", "localhost"}
-# The page may load its own files and nothing else: no CDN, no web fonts, no trackers.
-PAGE_HEADERS = {
+# Sent with every answer (see GuardMiddleware). The page may load its own files and nothing
+# else: no CDN, no web fonts, no trackers. No other site may show this app inside a frame,
+# where a click meant for that site could land on Sort. And the browser takes every answer
+# as the type it is sent as, so a file from the dump is never run as a page or a script.
+SECURITY_HEADERS = {
     "Content-Security-Policy": (
         "default-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; "
         "frame-ancestors 'none'"
     ),
-    "Cache-Control": "no-cache",
+    "X-Frame-Options": "DENY",
+    "X-Content-Type-Options": "nosniff",
 }
+# The page and the originals change on disk. With this the browser asks on every load
+# whether its stored copy still holds, and does not show an old one for hours.
+NO_CACHE = {"Cache-Control": "no-cache"}
+# An upload is collected under a hidden name of this kind and gets its own name once the
+# whole file is there. The dump listing skips names that start with a dot.
+UPLOAD_PREFIX = ".p0-upload-"
 # Originals the browser may show as they are. Any other file is sent as plain text or as a
 # download (see _original_response).
 SHOWN_AS_IS = {
@@ -55,10 +70,16 @@ class MoveRequest(StrictModel):
     group_id: str | None  # None means Unsorted; the field has to be sent either way
 
 
-class RefRequest(StrictModel):
-    """Body of POST /api/freeze and /api/unfreeze: a file id, a group id, or "Unsorted"."""
+class FreezeRequest(StrictModel):
+    """Body of POST /api/freeze and /api/unfreeze. It says what it names, in one of two shapes.
 
-    ref: str
+    {"file_id": "..."} is one file. {"group_id": "..."} is every file of that group, and
+    {"group_id": null} is every file in Unsorted, as in a move. Exactly one field is sent,
+    so a file that is named like a group can never be taken for the group.
+    """
+
+    file_id: str | None = None
+    group_id: str | None = None
 
 
 class NewGroup(StrictModel):
@@ -173,6 +194,40 @@ def _local_only(request: Request) -> None:
         raise HTTPException(403, "requests from other sites are refused")
 
 
+class GuardMiddleware:
+    """What every request and every answer goes through, the page's own files included.
+
+    A request that does not come from this app's own page is refused (see _local_only), and
+    every answer gets the security headers. This is done here and not in the routes, because
+    the files under /static and an address that no route serves never reach a route.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        """Wrap the app whose requests are checked."""
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Check one request, then let it through with the headers added to its answer."""
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def send_with_headers(message: Message) -> None:
+            """Pass one part of the answer on. Its first part is where the headers go."""
+            if message["type"] == "http.response.start":
+                message.setdefault("headers", [])
+                MutableHeaders(scope=message).update(SECURITY_HEADERS)
+            await send(message)
+
+        try:
+            _local_only(Request(scope))
+        except HTTPException as refused:
+            answer = JSONResponse({"detail": refused.detail}, status_code=refused.status_code)
+            await answer(scope, receive, send_with_headers)
+            return
+        await self.app(scope, receive, send_with_headers)
+
+
 def _as_detail(status_code: int) -> Callable[[Request, Exception], JSONResponse]:
     """Make a handler that answers an error of one kind with its text as {"detail": ...}."""
 
@@ -181,6 +236,23 @@ def _as_detail(status_code: int) -> Callable[[Request, Exception], JSONResponse]
         return JSONResponse({"detail": str(error)}, status_code=status_code)
 
     return handler
+
+
+def _describe(error: Exception) -> str:
+    """One plain line about an error nobody planned for: its type, its message, where to look."""
+    message = " ".join(str(error).split())  # a YAML error spreads its message over lines
+    what = f"{type(error).__name__}: {message}" if message else type(error).__name__
+    return f"unexpected error ({what}). The traceback is in the terminal of p0 ui."
+
+
+def _unexpected(request: Request, error: Exception) -> JSONResponse:
+    """Answer an error that no other handler knows, so that the page has a reason to show.
+
+    Such an error is a bug, or a case nobody planned for. It is raised again once this
+    answer is sent, which puts its traceback in the terminal. The answer is sent from
+    outside the middleware, so it brings the security headers itself.
+    """
+    return JSONResponse({"detail": _describe(error)}, status_code=500, headers=SECURITY_HEADERS)
 
 
 def _invalid_request(request: Request, error: RequestValidationError) -> JSONResponse:
@@ -208,7 +280,8 @@ def _original_response(path: Path) -> FileResponse:
     A PDF or a picture opens in the tab. Any other file that reads as text is sent as plain
     text, so a web page or a script from the dump is shown as its source: opened as a page it
     would run inside this app, where it could call the API. The rest (slides, archives)
-    download.
+    download. The browser is told to check back each time, so that a file that was replaced
+    in the dump is not shown as it was before.
     """
     media_type = SHOWN_AS_IS.get(path.suffix.lower())
     if media_type is None:
@@ -220,7 +293,7 @@ def _original_response(path: Path) -> FileResponse:
         media_type=media_type,
         filename=path.name,
         content_disposition_type="attachment" if media_type.endswith("octet-stream") else "inline",
-        headers={"X-Content-Type-Options": "nosniff"},
+        headers={"X-Content-Type-Options": "nosniff", **NO_CACHE},
     )
 
 
@@ -244,19 +317,15 @@ def create_app(root: Path, backend_factory: Callable[[], Backend] | None = None)
     job = SortJob()
     spend = SpendCounter(decide_path(root, JEV_LOG_FILE))
     # FastAPI's own docs pages load their scripts from a CDN, so they are switched off.
-    app = FastAPI(
-        title="decide_already",
-        dependencies=[Depends(_local_only)],
-        docs_url=None,
-        redoc_url=None,
-        openapi_url=None,
-    )
+    app = FastAPI(title="decide_already", docs_url=None, redoc_url=None, openapi_url=None)
+    app.add_middleware(GuardMiddleware)
     app.add_exception_handler(RequestValidationError, _invalid_request)
     app.add_exception_handler(ValueError, _as_detail(400))
     app.add_exception_handler(FileNotFoundError, _as_detail(404))
     app.add_exception_handler(FileExistsError, _as_detail(409))
     app.add_exception_handler(BackendError, _as_detail(409))
     app.add_exception_handler(OSError, _as_detail(500))
+    app.add_exception_handler(Exception, _unexpected)  # the last resort: any other error
 
     @contextmanager
     def changing() -> Iterator[None]:
@@ -294,6 +363,19 @@ def create_app(root: Path, backend_factory: Callable[[], Backend] | None = None)
             raise HTTPException(404, f"no file with the id {file_id!r} in the dump folder")
         return paths[file_id]
 
+    def card_note(file_id: str) -> vault.CardNote:
+        """The card note of the dump file with exactly this id. 404 when there is none.
+
+        Only the full id counts, never a bare file name, so one file cannot stand in for
+        another of the same name. A file with several notes (one was copied by hand): the
+        last one counts, as in the sorter.
+        """
+        dump_path(file_id)
+        notes = [note for note in vault.read_card_notes(root) if note.placement.file_id == file_id]
+        if not notes:
+            raise HTTPException(404, f"{file_id} has not been sorted yet")
+        return notes[-1]
+
     def current_group(group_id: str) -> Group:
         """The group with this id in the current set. 404 when there is none."""
         for group in vault.sync_group_set(root).groups:
@@ -301,19 +383,29 @@ def create_app(root: Path, backend_factory: Callable[[], Backend] | None = None)
                 return group
         raise HTTPException(404, f"no group with the id {group_id!r}")
 
-    def check_ref(ref: str) -> None:
-        """Check what a freeze or unfreeze names: a current group, Unsorted, or a dump file.
+    def freeze_target(body: FreezeRequest) -> tuple[str, corrections.RefKind]:
+        """What a freeze or unfreeze names, the way corrections takes it: (reference, kind).
 
-        As in corrections, a reference that names a group wins over a file of the same name.
+        The body says whether it names a file or a group, and the id is matched exactly: a
+        file by its card note, a group in the current set. 400 for a body that names both
+        or neither.
         """
-        groups = vault.sync_group_set(root).groups
-        if ref != UNSORTED_DIR and all(group.id != ref for group in groups):
-            dump_path(ref)
+        sent = body.model_fields_set
+        if sent == {"file_id"} and body.file_id is not None:
+            card_note(body.file_id)
+            return body.file_id, "file"
+        if sent == {"group_id"}:
+            if body.group_id is None:
+                return UNSORTED_DIR, "group"
+            return current_group(body.group_id).id, "group"
+        raise HTTPException(
+            400, "send file_id for one file, or group_id for a group (null for Unsorted)"
+        )
 
     @app.get("/", include_in_schema=False)
     def page() -> FileResponse:
         """The page itself."""
-        return FileResponse(STATIC_DIR / "index.html", headers=PAGE_HEADERS)
+        return FileResponse(STATIC_DIR / "index.html", headers=NO_CACHE)
 
     @app.get("/api/board")
     def board() -> dict:
@@ -355,21 +447,19 @@ def create_app(root: Path, backend_factory: Callable[[], Backend] | None = None)
         group that no longer exists).
         """
         with lock:
-            dump_path(file_id)
-            notes = [
-                note for note in vault.read_card_notes(root) if note.placement.file_id == file_id
-            ]
-            if not notes:
-                raise HTTPException(404, f"{file_id} has not been sorted yet")
-            note = notes[-1]  # a file with several notes: the last one counts, as in the sorter
+            note = card_note(file_id)
             groups = vault.sync_group_set(root).groups
             names = {group.id: group.name for group in groups}
+            # As on the board: the folder decides, under any spelling the file system treats
+            # as the same, and a folder that is no group's leaves it to the note's own group.
+            folders = vault.folder_ids(groups)
+            group_id = folders.get(vault.folder_key(note.folder), note.placement.group_id)
             probs = sorted(
                 (note.placement.probs or {}).items(), key=lambda item: (-item[1], item[0])
             )
             return {
                 "file_id": file_id,
-                "group_id": next((group.id for group in groups if group.name == note.folder), None),
+                "group_id": group_id if group_id in names else None,
                 "placement": note.placement.model_dump(mode="json"),
                 "probs": [
                     {"group_id": group_id, "name": names.get(group_id), "prob": prob}
@@ -387,8 +477,8 @@ def create_app(root: Path, backend_factory: Callable[[], Backend] | None = None)
         """The sort itself, on its own thread. However it ends, the job is told.
 
         A failure the tool knows (no API key, no groups, a file in the way of a card note)
-        ends the job with its message. Anything else is a bug: its traceback goes to the
-        terminal, and the page is pointed there.
+        ends the job with its message. Anything else is a bug: the job ends with the error's
+        type and message, and the error goes on to the terminal with its traceback.
         """
         report = None
         error: str | None = "the sort stopped on an unexpected error; see the terminal of p0 ui"
@@ -398,6 +488,9 @@ def create_app(root: Path, backend_factory: Callable[[], Backend] | None = None)
             error = None
         except (BackendError, ValueError, OSError) as known:
             error = str(known)
+        except Exception as bug:
+            error = _describe(bug)
+            raise
         finally:
             job.finish(report=report, error=error)
 
@@ -417,27 +510,30 @@ def create_app(root: Path, backend_factory: Callable[[], Backend] | None = None)
 
     @app.post("/api/move")
     def move(body: MoveRequest) -> dict:
-        """Put a file in a group, or in Unsorted for null, and freeze it there."""
+        """Put a file in a group, or in Unsorted for null, and freeze it there.
+
+        Both ids are matched exactly. 404 for a file that has no card note yet.
+        """
         with changing():
-            dump_path(body.file_id)
+            card_note(body.file_id)
             if body.group_id is not None:
                 current_group(body.group_id)
-            placement = corrections.move_file(root, body.file_id, body.group_id)
+            placement = corrections.move_file(root, body.file_id, body.group_id, exact=True)
         return placement.model_dump(mode="json")
 
     @app.post("/api/freeze")
-    def freeze(body: RefRequest) -> dict:
-        """Freeze one file, or every file in a group. Answers with the ids it froze."""
+    def freeze(body: FreezeRequest) -> dict:
+        """Freeze one file, or every file in a group or in Unsorted. Answers with those ids."""
         with changing():
-            check_ref(body.ref)
-            return {"frozen": corrections.freeze(root, body.ref)}
+            ref, kind = freeze_target(body)
+            return {"frozen": corrections.freeze(root, ref, kind=kind)}
 
     @app.post("/api/unfreeze")
-    def unfreeze(body: RefRequest) -> dict:
-        """Unfreeze one file, or every file in a group. Answers with the ids it unfroze."""
+    def unfreeze(body: FreezeRequest) -> dict:
+        """Unfreeze one file, or every file in a group or in Unsorted. Answers with those ids."""
         with changing():
-            check_ref(body.ref)
-            return {"unfrozen": corrections.unfreeze(root, body.ref)}
+            ref, kind = freeze_target(body)
+            return {"unfrozen": corrections.unfreeze(root, ref, kind=kind)}
 
     @app.post("/api/groups", status_code=201)
     def add_group(body: NewGroup) -> dict:
@@ -476,22 +572,33 @@ def create_app(root: Path, backend_factory: Callable[[], Backend] | None = None)
         """Add one file to the dump folder from the raw request body.
 
         Only a plain file name is taken, and a name that is already there is refused (409):
-        nothing in the dump is ever written over. The file is created new and filled as the
-        body arrives, and it is removed again if the body does not arrive in full.
+        nothing in the dump is ever written over. The body is collected under a hidden name,
+        which the dump listing skips, so a sort that runs meanwhile never sees half a file.
+        Only when the whole body has arrived is the file linked to its own name, and the
+        link fails when that name was taken in the meantime. The hidden file is removed in
+        every case, so a body that stops half way leaves nothing behind.
         """
         _check_upload_name(name)
-        target = root / Config.load(root).dump_dir / name
-        try:
-            handle = target.open("xb")  # x: fails when the name exists, and never follows a link
-        except FileExistsError:
-            raise HTTPException(409, f"{name} is already in the dump folder") from None
+        dump = root / Config.load(root).dump_dir
+        target = dump / name
+        taken = f"{name} is already in the dump folder"
+        if os.path.lexists(target):  # said before the body is read; the link has the last word
+            raise HTTPException(409, taken)
+        part = dump / f"{UPLOAD_PREFIX}{secrets.token_hex(8)}"
+        handle = part.open("xb")  # x: a new file, never one that is already there
         try:
             with handle:
                 async for chunk in request.stream():
                     handle.write(chunk)
-        except BaseException:
-            target.unlink(missing_ok=True)
-            raise
+            os.link(part, target)  # fails when the name exists, and never follows a link
+        except FileExistsError:
+            raise HTTPException(409, taken) from None
+        except ClientDisconnect:
+            raise HTTPException(
+                400, f"{name} did not arrive in full, so it was not added"
+            ) from None
+        finally:
+            part.unlink(missing_ok=True)
         return {"file_id": name}
 
     @app.post("/api/suggest")
