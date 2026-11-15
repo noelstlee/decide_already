@@ -325,7 +325,10 @@ textarea {
 }
 
 .lane {
-  flex: 0 0 272px;
+  /* Lanes share the width of the window. Under 232px each, the board scrolls sideways. */
+  flex: 1 1 272px;
+  min-width: 232px;
+  max-width: 340px;
   display: flex;
   flex-direction: column;
   min-height: 0;

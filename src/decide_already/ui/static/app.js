@@ -55,6 +55,13 @@ function button(label, onclick, attrs = {}) {
 // A count with its noun: "1 file", "3 files".
 const plural = (count, noun) => `${count} ${noun}${count === 1 ? "" : "s"}`;
 
+// A file name with a line break allowed after each "_", "-" and ".", so that a long name wraps
+// between its parts and not in the middle of a word.
+function breakable(name) {
+  const parts = name.match(/[^_.-]*[_.-]?/g).filter(Boolean);
+  return parts.flatMap((part, index) => (index === 0 ? [part] : [el("wbr"), part]));
+}
+
 // A probability with two decimals, or "?" when the model gave none.
 const prob = (value) => (typeof value === "number" ? value.toFixed(2) : "?");
 
@@ -474,7 +481,7 @@ function card(file) {
         open();
       },
     },
-    el("span", { class: "card-name" }, cardFolder(file), file.name),
+    el("span", { class: "card-name" }, cardFolder(file), breakable(file.name)),
     el("span", { class: "card-type" }, file.file_type),
     cardProbability(file),
     reason && el("span", { class: "card-reason" }, reason),
@@ -636,7 +643,11 @@ function openForm(group) {
   }
   render();
   const input = focusKey("form:name");
-  if (input) input.scrollIntoView({ block: "nearest", inline: "nearest" });
+  // The whole lane is brought into view, not just the input: a new group's form is the last
+  // lane, and the input alone would leave the lane's edge cut off.
+  if (input) {
+    (input.closest(".lane") || input).scrollIntoView({ block: "nearest", inline: "nearest" });
+  }
 }
 
 // Leave the form without saving, and give the focus back to the button that opened it.
@@ -743,7 +754,7 @@ function renderPanel() {
 function panelHead(file) {
   const folder = folderOf(file);
   const kind = folder ? `${file.file_type}, in ${folder}` : file.file_type;
-  const title = el("h2", { class: "panel-title" }, file.name);
+  const title = el("h2", { class: "panel-title" }, breakable(file.name));
   return el(
     "header",
     { class: "panel-head" },
