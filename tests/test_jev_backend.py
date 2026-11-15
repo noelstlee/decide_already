@@ -1,7 +1,9 @@
 """The Jev backend against a fake TypeSafe endpoint. Nothing here touches the network."""
 
 import dataclasses
+import errno
 import json
+import os
 import random
 import threading
 import time
@@ -11,8 +13,15 @@ from datetime import datetime, timedelta
 import httpx2
 import pytest
 
+from decide_already import backends
 from decide_already.backends import jev, make_backend
-from decide_already.backends.base import BackendError, BudgetExceeded, SortRequest
+from decide_already.backends.base import (
+    BackendError,
+    BudgetExceeded,
+    LogFailed,
+    RunStopped,
+    SortRequest,
+)
 from decide_already.backends.jev import JevBackend
 from decide_already.config import Config
 from decide_already.log import read_jsonl, total_input_tokens
@@ -83,6 +92,13 @@ def answer(model: str = PIN, tokens: int = TOKENS) -> dict:
         },
         "usage": {"input_tokens": tokens, "output_tokens": 30},
     }
+
+
+def unreadable_answer() -> dict:
+    """A 200 body the pinned SDK cannot validate: the choice's confidence came back as a word."""
+    body = answer()
+    body["answers"]["group"]["confidence"] = "high"
+    return body
 
 
 def ok(body: dict | None = None, request_id: str = "req_test") -> httpx2.Response:
@@ -159,9 +175,11 @@ def wire(monkeypatch):
     return wire
 
 
-def backend_on(server, tmp_path, *, config: Config | None = None, seed: int = 7) -> JevBackend:
-    """A JevBackend that sends to `server` and logs to tmp_path/jev.jsonl."""
-    return JevBackend(
+def backend_on(
+    server, tmp_path, *, config: Config | None = None, seed: int = 7, kind: type = JevBackend
+) -> JevBackend:
+    """A JevBackend (or its subclass `kind`) sending to `server`, logging to tmp_path/jev.jsonl."""
+    return kind(
         config or Config(),
         tmp_path / "jev.jsonl",
         api_key=KEY,
@@ -395,13 +413,275 @@ def test_a_response_missing_a_groups_probability_raises(tmp_path):
     assert read_jsonl(tmp_path / "jev.jsonl")[0]["status"] == "error"
 
 
-def test_a_body_that_is_not_an_answer_raises(tmp_path):
-    server = Server(lambda request, number: httpx2.Response(200, text="<html>proxy</html>"))
+@pytest.mark.parametrize(
+    "body", [{"text": "<html>proxy</html>"}, {"json": ["not", "an", "answer"]}]
+)
+def test_a_body_that_is_not_an_answer_raises(tmp_path, body):
+    """A 200 whose body is not a JSON object is no answer, so its line keeps no response."""
+    server = Server(lambda request, number: httpx2.Response(200, **body))
     with pytest.raises(BackendError):
         backend_on(server, tmp_path).sort(request_for())
     (line,) = read_jsonl(tmp_path / "jev.jsonl")
     assert line["status"] == "error"
     assert line["response"] is None
+    assert line["input_tokens"] is None
+
+
+# An answer the SDK cannot validate: answered and billed, so kept and counted
+
+
+def test_an_answer_the_sdk_cannot_validate_keeps_its_body_tokens_and_ids(tmp_path):
+    """The call fails, but its line holds what came back: the body, the tokens, the ids."""
+    drifted = unreadable_answer()
+    server = Server(lambda request, number: ok(drifted))
+    with pytest.raises(BackendError, match="Invalid response data") as caught:
+        backend_on(server, tmp_path).sort(request_for())
+    assert not isinstance(caught.value, RunStopped)
+    assert len(server.requests) == 1
+    (line,) = read_jsonl(tmp_path / "jev.jsonl")
+    assert list(line) == LOG_FIELDS
+    assert line["status"] == "error"
+    assert "answers.group.confidence" in line["error"]
+    assert line["response"] == drifted
+    assert line["input_tokens"] == TOKENS
+    assert line["request_id"] == "req_test"
+    assert line["model_requested"] == line["model_answered"] == PIN
+
+
+def test_answers_the_sdk_cannot_validate_count_toward_the_spend_cap(tmp_path):
+    """Two of them reach a cap of two calls, for this backend and for one started later."""
+    config = Config(usd_per_million_tokens=1.0, max_spend_usd=2 * TOKENS / 1e6)
+    server = Server(lambda request, number: ok(unreadable_answer()))
+    backend = backend_on(server, tmp_path, config=config)
+    for _ in range(2):
+        with pytest.raises(BackendError, match="Invalid response data"):
+            backend.sort(request_for())
+    assert total_input_tokens(tmp_path / "jev.jsonl") == 2 * TOKENS
+    for same_log in (backend, backend_on(server, tmp_path, config=config)):
+        with pytest.raises(BudgetExceeded):
+            same_log.sort(request_for())
+    assert len(server.requests) == 2
+
+
+@pytest.mark.parametrize(
+    "usage", [None, {"input_tokens": "2710"}, {"input_tokens": True}, {"input_tokens": 2.5}, [2710]]
+)
+def test_a_token_count_that_cannot_be_read_is_not_logged_as_one(tmp_path, usage):
+    """Spend is summed from the log, so only a whole number may be logged as input_tokens."""
+    body = answer()
+    if usage is None:
+        del body["usage"]
+    else:
+        body["usage"] = usage
+    server = Server(lambda request, number: ok(body))
+    with pytest.raises(BackendError, match="Invalid response data"):
+        backend_on(server, tmp_path).sort(request_for())
+    (line,) = read_jsonl(tmp_path / "jev.jsonl")
+    assert line["response"] == body
+    assert line["input_tokens"] is None
+    assert total_input_tokens(tmp_path / "jev.jsonl") == 0
+
+
+def test_an_unvalidated_answer_without_a_model_name_logs_none(tmp_path):
+    """model_answered is only what the body says: nothing is filled in for it."""
+    body = answer()
+    del body["model"]
+    server = Server(lambda request, number: ok(body))
+    with pytest.raises(BackendError, match="Invalid response data"):
+        backend_on(server, tmp_path).sort(request_for())
+    (line,) = read_jsonl(tmp_path / "jev.jsonl")
+    assert line["model_answered"] is None
+    assert line["response"] == body
+    assert line["input_tokens"] == TOKENS
+
+
+# A call that is interrupted: logged before the interruption goes on
+
+
+@pytest.mark.parametrize(
+    ("interruption", "logged_as"),
+    [
+        (KeyboardInterrupt(), "interrupted: KeyboardInterrupt"),
+        (RuntimeError("the socket broke"), "interrupted: RuntimeError: the socket broke"),
+    ],
+    ids=["ctrl_c", "not_an_sdk_error"],
+)
+def test_an_interrupted_call_leaves_a_line_and_the_interruption_goes_on(
+    tmp_path, interruption, logged_as
+):
+    """Ctrl+C, or any error that is not the SDK's own, while the request is out."""
+
+    def cut_off(request, number):
+        """Break off the request the way Ctrl+C or a failing layer under the SDK does."""
+        raise interruption
+
+    server = Server(cut_off)
+    with pytest.raises(type(interruption)) as caught:
+        backend_on(server, tmp_path).sort(request_for())
+    assert caught.value is interruption
+    assert len(server.requests) == 1
+    (line,) = read_jsonl(tmp_path / "jev.jsonl")
+    assert list(line) == LOG_FIELDS
+    assert line["status"] == "error"
+    assert line["error"] == logged_as
+    assert line["response"] is None
+    assert line["input_tokens"] is None
+    assert line["request"] == server.bodies[0]
+    assert line["option_order"] == sent_order(server.bodies[0])
+    assert line["latency_ms"] >= 0
+
+
+def test_an_interrupt_after_the_answer_was_read_keeps_the_answer_in_its_line(tmp_path, monkeypatch):
+    """The line then holds the response and its tokens, and the call counts as spent."""
+
+    def ctrl_c(self, response, groups):
+        """Stand in for the check of the answer, with Ctrl+C arriving during it."""
+        raise KeyboardInterrupt
+
+    config = Config(usd_per_million_tokens=1.0, max_spend_usd=TOKENS / 1e6)
+    server = Server()
+    backend = backend_on(server, tmp_path, config=config)
+    with monkeypatch.context() as patch:
+        patch.setattr(JevBackend, "_problem", ctrl_c)
+        with pytest.raises(KeyboardInterrupt):
+            backend.sort(request_for())
+    (line,) = read_jsonl(tmp_path / "jev.jsonl")
+    assert line["status"] == "error"
+    assert line["error"] == "interrupted: KeyboardInterrupt"
+    assert line["response"] == answer()
+    assert line["input_tokens"] == TOKENS
+    assert line["request_id"] == "req_test"
+    with pytest.raises(BudgetExceeded):
+        backend.sort(request_for())
+    assert len(server.requests) == 1
+
+
+# A log that cannot be written: nothing is sent, and the run stops
+
+
+def folder_is_a_file(log) -> None:
+    """Put a plain file where the log's folder should be."""
+    log.parent.write_text("not a folder")
+
+
+def log_is_a_folder(log) -> None:
+    """Put a folder where the log file should be."""
+    log.mkdir(parents=True)
+
+
+def log_is_read_only(log) -> None:
+    """Leave an empty log that may only be read, as a copy from a read-only place can be."""
+    log.parent.mkdir()
+    log.touch()
+    log.chmod(0o444)
+    if os.access(log, os.W_OK):
+        pytest.skip("this user may write to a read-only file")
+
+
+@pytest.mark.parametrize("spoil", [folder_is_a_file, log_is_a_folder, log_is_read_only])
+def test_a_log_that_cannot_be_opened_stops_the_call_before_it_is_sent(tmp_path, spoil):
+    """Every call must be logged, so with no way to log it nothing goes out."""
+    log = tmp_path / ".decide" / "jev.jsonl"
+    server = Server()
+    backend = backend_on(server, log.parent)
+    spoil(log)
+    for _ in range(2):
+        with pytest.raises(LogFailed, match="nothing was sent") as caught:
+            backend.sort(request_for())
+        assert isinstance(caught.value, RunStopped)
+        assert isinstance(caught.value.__cause__, OSError)
+        assert str(log) in str(caught.value)
+        assert caught.value.__cause__.strerror in str(caught.value)
+    assert server.requests == []
+
+
+def test_the_log_check_makes_the_folder_and_adds_no_line_of_its_own(tmp_path):
+    """A first call in a vault with no .decide folder yet is sent, and logged as one line."""
+    log = tmp_path / "new" / ".decide" / "jev.jsonl"
+    server = Server()
+    backend_on(server, log.parent).sort(request_for())
+    assert len(server.requests) == 1
+    assert [line["file_id"] for line in read_jsonl(log)] == [FILE_ID]
+
+
+def full_disk(path, record) -> None:
+    """Stand in for append_jsonl on a disk that filled up after the log was opened."""
+    raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+
+
+def test_an_answer_that_cannot_be_logged_stops_the_run(tmp_path, monkeypatch):
+    """The call that went out is reported as unlogged, and no later call is sent."""
+    log = tmp_path / "jev.jsonl"
+    server = Server()
+    backend = backend_on(server, tmp_path)
+    with monkeypatch.context() as patch:
+        patch.setattr(jev, "append_jsonl", full_disk)
+        with pytest.raises(LogFailed, match=f"the call for {FILE_ID} is not in the log") as caught:
+            backend.sort(request_for())
+    assert isinstance(caught.value.__cause__, OSError)
+    assert str(log) in str(caught.value)
+    assert os.strerror(errno.ENOSPC) in str(caught.value)
+    # From here the disk has room again and a line could be written. The backend still refuses.
+    with pytest.raises(LogFailed, match="nothing was sent") as later:
+        backend.sort(request_for("syllabus.pdf"))
+    assert os.strerror(errno.ENOSPC) in str(later.value)
+    assert len(server.requests) == 1
+    assert read_jsonl(log) == []
+
+
+def test_an_answer_that_could_not_be_logged_still_counts_as_spent(tmp_path, monkeypatch):
+    """The log misses the call, but this backend's cap does not: one call was the cap."""
+    monkeypatch.setattr(jev, "append_jsonl", full_disk)
+    config = Config(usd_per_million_tokens=1.0, max_spend_usd=TOKENS / 1e6)
+    server = Server()
+    backend = backend_on(server, tmp_path, config=config)
+    with pytest.raises(LogFailed, match="is not in the log"):
+        backend.sort(request_for())
+    with pytest.raises(BudgetExceeded):
+        backend.sort(request_for())
+    assert len(server.requests) == 1
+
+
+def test_a_failed_call_that_cannot_be_logged_is_a_log_failure(tmp_path, monkeypatch):
+    """A call the server refused went out too, so an unwritten line for it stops the run."""
+    monkeypatch.setattr(jev, "append_jsonl", full_disk)
+    server = Server(lambda request, number: refusal(400))
+    with pytest.raises(LogFailed, match="is not in the log"):
+        backend_on(server, tmp_path).sort(request_for())
+    assert len(server.requests) == 1
+
+
+def test_a_record_that_is_not_json_is_a_log_failure(tmp_path):
+    """The SDK can send values a JSON line cannot hold, such as a date."""
+    server = Server()
+    backend = backend_on(server, tmp_path)
+    with pytest.raises(LogFailed, match="not JSON serializable") as caught:
+        backend.sort(request_for(state={**STATE, "seen": datetime(2026, 11, 15)}))
+    assert isinstance(caught.value.__cause__, TypeError)
+    assert len(server.requests) == 1
+    assert read_jsonl(tmp_path / "jev.jsonl") == []
+
+
+def test_an_interruption_goes_on_even_when_its_line_cannot_be_written(tmp_path, monkeypatch):
+    """Ctrl+C is never turned into a log failure. The failure is attached to it as a note."""
+    monkeypatch.setattr(jev, "append_jsonl", full_disk)
+
+    def ctrl_c(request, number):
+        """Break off the first request the way Ctrl+C does. A later one would be answered."""
+        if number == 1:
+            raise KeyboardInterrupt
+        return ok()
+
+    server = Server(ctrl_c)
+    backend = backend_on(server, tmp_path)
+    with pytest.raises(KeyboardInterrupt) as caught:
+        backend.sort(request_for())
+    (note,) = caught.value.__notes__
+    assert str(tmp_path / "jev.jsonl") in note
+    assert f"the call for {FILE_ID} is not in the log" in note
+    with pytest.raises(LogFailed, match="nothing was sent"):
+        backend.sort(request_for())
+    assert len(server.requests) == 1
 
 
 # The spend cap
@@ -513,9 +793,58 @@ def test_the_key_never_appears_in_the_log_or_in_an_error(tmp_path):
     assert "bad key: Bearer ***" in str(echoed.value)
 
 
-def test_make_backend_without_a_key_raises(tmp_path):
+@pytest.mark.parametrize("readable", [True, False], ids=["an_answer", "an_unvalidated_answer"])
+def test_a_response_body_that_quotes_the_key_is_logged_with_the_key_blanked_out(tmp_path, readable):
+    """Whether or not the SDK can validate the body, it reaches the log without the key."""
+
+    def reply(request, number):
+        """Answer, quoting the Authorization header in a field the SDK does not know."""
+        body = answer() if readable else unreadable_answer()
+        body["debug"] = {"headers": [request.headers["authorization"]], f"key {KEY}": True}
+        return ok(body)
+
+    backend = backend_on(Server(reply), tmp_path)
+    if readable:
+        assert backend.sort(request_for()).probs == PROBS_BY_ID
+    else:
+        with pytest.raises(BackendError) as caught:
+            backend.sort(request_for())
+        assert KEY not in str(caught.value)
+    assert KEY not in (tmp_path / "jev.jsonl").read_text()
+    (line,) = read_jsonl(tmp_path / "jev.jsonl")
+    assert line["response"]["debug"] == {"headers": ["Bearer ***"], "key ***": True}
+    assert line["response"]["usage"] == answer()["usage"]
+
+
+def test_an_interruption_that_quotes_the_key_is_logged_with_the_key_blanked_out(tmp_path):
+    """The text of a foreign error goes into the log line, so the key is blanked in it too."""
+
+    def cut_off(request, number):
+        """Fail below the SDK with a message that quotes the Authorization header."""
+        raise RuntimeError(f"cannot send {request.headers['authorization']}")
+
+    with pytest.raises(RuntimeError):
+        backend_on(Server(cut_off), tmp_path).sort(request_for())
+    assert KEY not in (tmp_path / "jev.jsonl").read_text()
+    (line,) = read_jsonl(tmp_path / "jev.jsonl")
+    assert line["error"] == "interrupted: RuntimeError: cannot send Bearer ***"
+
+
+def test_make_backend_without_a_key_raises(tmp_path, monkeypatch):
+    """With no key to be found, the backend cannot be built.
+
+    The key lookup is replaced: the real one also reads any .env file above the temp folder.
+    """
+    asked = []
+
+    def no_key(name, start=None):
+        """Stand in for config.env_value: remember what was asked for and find nothing (None)."""
+        asked.append((name, start))
+
+    monkeypatch.setattr(backends, "env_value", no_key)
     with pytest.raises(BackendError, match="TYPESAFE_API_KEY"):
         make_backend(tmp_path, Config())
+    assert asked == [("TYPESAFE_API_KEY", tmp_path)]
 
 
 def test_make_backend_uses_the_key_from_the_environment_and_the_vault_log(
@@ -543,11 +872,60 @@ def test_make_backend_finds_the_key_in_a_dotenv_file_above_the_vault(tmp_path, w
 # Threads
 
 
-def test_threads_each_write_one_whole_line_and_the_spend_adds_up(tmp_path):
+class OwnedLock:
+    """A lock that knows which thread holds it, so a test can ask whether the caller does."""
+
+    def __init__(self):
+        """Start free."""
+        self._lock = threading.Lock()
+        self._owner = None
+
+    def __enter__(self):
+        """Take the lock and note the calling thread as its holder."""
+        self._lock.acquire()
+        self._owner = threading.get_ident()
+
+    def __exit__(self, *exc_info):
+        """Forget the holder and free the lock."""
+        self._owner = None
+        self._lock.release()
+
+    def held_here(self) -> bool:
+        """Say whether the calling thread holds the lock."""
+        return self._owner == threading.get_ident()
+
+
+class WatchedBackend(JevBackend):
+    """A JevBackend that notes, at each change of its spend counter, who holds its lock."""
+
+    def __setattr__(self, name, value):
+        """Note whether the caller holds the lock when the counter changes after its first value."""
+        if name == "_input_tokens" and name in vars(self):
+            self.counter_changes.append(self._lock.held_here())
+        super().__setattr__(name, value)
+
+
+def test_threads_each_write_one_whole_line_and_the_spend_adds_up(tmp_path, monkeypatch):
+    """Forty calls from eight threads: whole lines, an exact spend, and the lock behind both.
+
+    The outcome alone can come out right without the lock, so the mechanism is checked too: the
+    calling thread holds the backend's lock at every log append and every change of the counter.
+    """
     calls = 40
     config = Config(usd_per_million_tokens=1.0, max_spend_usd=calls * TOKENS / 1e6)
     server = Server()
-    backend = backend_on(server, tmp_path, config=config)
+    backend = backend_on(server, tmp_path, config=config, kind=WatchedBackend)
+    backend._lock = OwnedLock()
+    backend.counter_changes = []
+    appends = []
+    real_append = jev.append_jsonl
+
+    def watched_append(path, record):
+        """Note whether the caller holds the lock, then append as usual."""
+        appends.append(backend._lock.held_here())
+        real_append(path, record)
+
+    monkeypatch.setattr(jev, "append_jsonl", watched_append)
     long_state = {**STATE, "opening": "kernel methods " * 2000}
     file_ids = [f"notes/file_{number}.md" for number in range(calls)]
 
@@ -558,6 +936,8 @@ def test_threads_each_write_one_whole_line_and_the_spend_adds_up(tmp_path):
     with ThreadPoolExecutor(max_workers=8) as pool:
         results = list(pool.map(sort, file_ids))
 
+    assert appends == [True] * calls
+    assert backend.counter_changes == [True] * calls
     assert [result.file_id for result in results] == file_ids
     lines = (tmp_path / "jev.jsonl").read_text().splitlines()
     assert len(lines) == calls

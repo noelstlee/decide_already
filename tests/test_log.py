@@ -1,8 +1,9 @@
 import json
+import os
 
 import pytest
 
-from decide_already.log import append_jsonl, read_jsonl, total_input_tokens
+from decide_already.log import append_jsonl, check_appendable, read_jsonl, total_input_tokens
 
 
 def test_append_then_read_keeps_the_records_in_order(tmp_path):
@@ -34,6 +35,49 @@ def test_append_creates_the_folder(tmp_path):
     path = tmp_path / ".decide" / "jev.jsonl"
     append_jsonl(path, {"a": 1})
     assert read_jsonl(path) == [{"a": 1}]
+
+
+def test_check_appendable_creates_the_folder_and_an_empty_file(tmp_path):
+    """A log that does not exist yet is created empty, so a later append has somewhere to go."""
+    path = tmp_path / "new" / ".decide" / "jev.jsonl"
+    check_appendable(path)
+    assert path.read_bytes() == b""
+    assert read_jsonl(path) == []
+
+
+def test_check_appendable_writes_nothing_to_an_existing_file(tmp_path):
+    """Checking twice, before and after an append, leaves exactly the appended line."""
+    path = tmp_path / "calls.jsonl"
+    check_appendable(path)
+    append_jsonl(path, {"a": 1})
+    before = path.read_bytes()
+    check_appendable(path)
+    assert path.read_bytes() == before
+    assert read_jsonl(path) == [{"a": 1}]
+
+
+def test_check_appendable_raises_when_the_folder_cannot_be_made(tmp_path):
+    """A plain file sits where the folder should be."""
+    (tmp_path / ".decide").write_text("not a folder")
+    with pytest.raises(FileExistsError):
+        check_appendable(tmp_path / ".decide" / "jev.jsonl")
+    assert (tmp_path / ".decide").read_text() == "not a folder"
+
+
+def test_check_appendable_raises_when_the_file_cannot_be_opened_for_append(tmp_path):
+    """A folder sits where the file should be, then a file that may only be read."""
+    folder = tmp_path / "folder.jsonl"
+    folder.mkdir()
+    with pytest.raises(IsADirectoryError):
+        check_appendable(folder)
+    read_only = tmp_path / "read_only.jsonl"
+    read_only.write_text('{"a": 1}\n')
+    read_only.chmod(0o444)
+    if os.access(read_only, os.W_OK):
+        pytest.skip("this user may write to a read-only file")
+    with pytest.raises(PermissionError):
+        check_appendable(read_only)
+    assert read_jsonl(read_only) == [{"a": 1}]
 
 
 def test_a_missing_file_reads_as_empty(tmp_path):
@@ -71,6 +115,28 @@ def test_a_record_that_is_not_json_writes_nothing(tmp_path):
     with pytest.raises(TypeError):
         append_jsonl(path, {"when": object()})
     assert read_jsonl(path) == [{"a": 1}]
+
+
+def test_a_line_that_only_partly_fits_is_cut_off_again(tmp_path):
+    """A failed append leaves the file as it was: half a line would break every later read.
+
+    A limit on how large this process may make a file stands in for a full disk, so the file
+    opens and the write fails part way through the line.
+    """
+    resource = pytest.importorskip("resource")
+    path = tmp_path / "calls.jsonl"
+    append_jsonl(path, {"n": 1})
+    before = path.read_bytes()
+    soft, hard = resource.getrlimit(resource.RLIMIT_FSIZE)
+    resource.setrlimit(resource.RLIMIT_FSIZE, (len(before) + 100, hard))
+    try:
+        with pytest.raises(OSError):
+            append_jsonl(path, {"opening": "kernel methods " * 2000})
+    finally:
+        resource.setrlimit(resource.RLIMIT_FSIZE, (soft, hard))
+    assert path.read_bytes() == before
+    append_jsonl(path, {"n": 2})
+    assert read_jsonl(path) == [{"n": 1}, {"n": 2}]
 
 
 def test_total_input_tokens_counts_every_line_that_has_tokens(tmp_path):
