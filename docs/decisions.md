@@ -4,6 +4,17 @@ Newest first. "Decided" means Stan made the call; "Proposed" means it is in a bl
 
 | Date | Decision | Status | Why |
 | --- | --- | --- | --- |
+| 2026-11-15 | Phase 0 gets a minimal local web UI (`p0 ui`): FastAPI and uvicorn serving one plain HTML, CSS and JS page over the same functions as the CLI | Decided | Stan wants to see the loop in a UI and judge the UX; the CLI and Obsidian stay |
+| 2026-11-15 | The smoke test runs on 10 synthetic course files of mixed types, not personal files. `smoke_test/mock_data` (real CS 4641 material) is not sent anywhere | Decided | Small, safe to send, exercises every extractor; course material still needs the instructor's OK |
+| 2026-11-15 | Public evaluation set: MIT OCW 6.867 (CC BY-NC-SA) plus the MIT 6.S191 lab files (MIT license). Five groups: Lecture notes, Homework, Exams, Projects, Logistics | Decided | Stan delegated the dataset and the groups; 6.867 has no code, the labs add notebooks and Python |
+| 2026-11-15 | Gold labels come from the sources' own metadata (OCW resource types, repo folders), written by code before any sort; Stan spot-checks a sample | Decided | Blind by construction, and the run can finish without hand labeling. Hand labels can replace them later |
+| 2026-11-15 | Baselines: file-name rules; embeddings from a local model (fastembed, bge-small); an LLM classifier through the Anthropic API, pending a key | Decided | The two non-LLM baselines the go/no-go depends on need no key |
+| 2026-11-15 | Pin `jev-1.14.0` for Phase 0 | Decided | Newest; both exact versions were verified live; the companion yes/no is the documented pattern for 1.14 |
+| 2026-11-15 | Spend cap per vault (`max_spend_usd`, default 5.00), enforced by the Jev backend from its own log | Decided | Bring-your-own-key tool; Stan set a $5 cap for the Phase 0 run |
+| 2026-11-15 | Fakes live in `tests/` only; the config no longer offers a fake backend | Decided | Stan's rule: no mocking outside the test suite |
+| 2026-11-15 | Record changes for the correction loop: `Placement` gains `source` and `file_type`; `Label` gains the kind `unfrozen`, a nullable `to_group` and `jev_set_version`; `Suggestion` is new; card note frontmatter uses group ids, not names | Proposed (implemented, confirm) | Needed to implement the spec's own action table; ids survive renames |
+| 2026-11-15 | A file whose content changed loses its freeze and is re-sorted | Proposed (implemented, confirm) | The spec's "How it works" says so; it was also listed as an open question |
+| 2026-11-15 | The `fits_any` question carries the group descriptions itself | Proposed (implemented, confirm) | Each Jev question is answered on its own and cannot see the Choice's criteria |
 | 2026-10-25 | Jev client: the official `typesafe-sdk`, pinned at 0.7.5, imported only inside `backends/jev.py`; raw httpx not used | Decided | Official and MIT; Pydantic v2; retries honor Retry-After; raw response exposed for the log; no telemetry; option order preserved. Early (two breaking changes in Sept 2026), so pin exactly |
 | 2026-10-25 | Stack confirmed as in `CLAUDE.md`: Python 3.12 via uv, Pydantic v2, Typer, PyYAML, pytest, ruff; PDF and slide extractors join with the public dataset | Decided | Approved with the Phase 0 build plan |
 | 2026-10-24 | Repo `docs/` is the working copy of the design; the Claude Docs blueprints are snapshots | Proposed | Claude Code reads the repo; one place to edit avoids drift |
@@ -25,8 +36,8 @@ Newest first. "Decided" means Stan made the call; "Proposed" means it is in a bl
 
 ## Still open
 
-- Jev version to pin: `jev-1.14.0` or `jev-1.13.0` (one for both phases).
-- License for the repo.
+- License for the repo. Note: PyMuPDF is AGPL-3.0 (or commercial), which constrains the choice; pypdf (BSD) is a possible swap, isolated to `extract/`.
 - CLI and tool-folder names (`p0`, `.decide/`).
 - Whether design docs stay public in this repo.
+- New dates for the Phase 0 go/no-go (the proposed 2026-11-01 has passed) and their effect on Phase 1.
 - Phase 2 choices: see the last section of [phase1.md](phase1.md).

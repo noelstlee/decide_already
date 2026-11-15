@@ -5,6 +5,14 @@
 > 1. **Smoke test on personal files first** (new step 0), before any course files.
 > 2. **Local-first, Obsidian-compatible vault** as the storage design (replaces the `phase0/` state-file layout). Direction accepted; layout details are proposed and listed in Open questions.
 >
+> Changes Stan made on 2026-11-15 (see [decisions.md](decisions.md)):
+> 3. **The smoke test uses 10 synthetic course files**, not personal files.
+> 4. **A minimal local web UI** (`p0 ui`) joins Phase 0, next to the commands and Obsidian.
+> 5. **Gold labels for the public course come from the sources' own metadata**, written by code before any sort, instead of hand labels.
+> 6. **`jev-1.14.0` is the pinned version.**
+>
+> How the spec maps to code: [implementation.md](implementation.md).
+>
 > "You" means the person using the tool (Stan, for now).
 
 Phase 0 tests one thing before any knowledge base exists: can Jev, with no reasoning LLM, sort a dump of files into groups you name? It also measures how often you have to correct it, and hands Phase 1 a working Jev client, a correction loop and the first labeled data.
@@ -20,8 +28,8 @@ Phase 0 is one Jev call per file, a loop for correcting it, and the numbers that
 | Text extraction and a short card per file, built by code | Search, indexes, chunking |
 | One Jev Choice plus one yes/no per file | Update relations, routing, reranking, leak checks |
 | Freeze, move, add or edit a category, rerun | Images, multi-label tags, subcategories |
-| Personal files for the smoke test, then public course files | CS 4641/7641 files (need the instructor's OK) |
-| Commands plus an Obsidian vault as the board | A custom drag-and-drop UI |
+| Synthetic files for the smoke test, then public course files | CS 4641/7641 files (need the instructor's OK) |
+| Commands, an Obsidian vault as the board, and a minimal local web UI | A hosted or multi-user UI |
 
 No reasoning LLM sits in the sorting path; one appears only as a baseline. Phase 1 inherits the Jev client and its log, the correction loop, the card format for D1, and every correction you make as a labeled example.
 
@@ -118,7 +126,7 @@ The winner becomes the input format for D1 in Phase 1.
 
 ## Your actions
 
-Commands come first; Obsidian (or Finder) is the board, and a custom drag-and-drop UI can come later by calling the same functions. Only moving and freezing turn a file's group into a label.
+Commands come first; Obsidian (or Finder) is the board, and `p0 ui` opens a minimal local web page that calls the same functions. Only moving and freezing turn a file's group into a label.
 
 | Action | Command | What happens | What gets logged |
 | --- | --- | --- | --- |
@@ -235,15 +243,15 @@ class Label(BaseModel):           # one line in .decide/labels.jsonl
 
 ## Evaluation
 
-Phase 0 passes if the card-based sort beats file-name rules and embedding similarity on labels you made before seeing Jev's picks. The correction rate then says whether sorting by hand would have been faster.
+Phase 0 passes if the card-based sort beats file-name rules and embedding similarity on gold labels made before any Jev pick. The correction rate then says whether sorting by hand would have been faster.
 
 ### Dataset
 
-- **Smoke test (step 0):** a few dozen of your own files with 3 to 5 groups you pick. No metrics, just "does the loop work and do the picks look sane". Only use files you are fine sending to TypeSafe as cards.
+- **Smoke test (step 0):** 10 synthetic course files of mixed types (markdown, text, Python, notebook, PDF, slides), written by `scripts/make_smoke_vault.py`, with the walkthrough's groups. No metrics, just "does the loop work and do the picks look sane".
 - **Public course:** [MIT OCW 6.867 Machine Learning, Fall 2006](https://ocw.mit.edu/courses/6-867-machine-learning-fall-2006/resources/hw2_soln/), under CC BY-NC-SA 4.0. It has a syllabus, lecture notes, problem sets and solutions, exams and projects, all as PDFs, with a whole-course download.
-- **Code files:** 6.867 has none, so add starter code and solutions from a public course repo to test HW code.
+- **Code files:** 6.867 has none, so the lab notebooks, their solutions and the helper modules of MIT 6.S191 (GitHub `MITDeepLearning/introtodeeplearning`, MIT license) are added to test HW code.
 - **CS 4641/7641:** joins once the instructor OKs sending it to TypeSafe.
-- **Blind labels:** before the first sort, you place every file (or 100, if there are more) into the starting groups yourself. These are the gold labels. The final groups after corrections are reported separately, since seeing Jev's pick first pulls your label toward it.
+- **Gold labels:** written by code before the first sort, from the sources' own metadata (OCW's resource types, the repo's folders). You spot-check a sample. Hand labels by you remain the stricter option and can replace them later. The final groups after corrections are reported separately, since seeing Jev's pick first pulls a label toward it.
 - **Split:** 20% dev for the cutoffs, 80% test.
 
 ### Metrics
@@ -281,25 +289,26 @@ Phase 0 passes if the card-based sort beats file-name rules and embedding simila
 
 Steps 0 to 4 fit in one night. The go/no-go call is proposed for 2026-11-01, the day before Phase 1's ingest calls start.
 
-0. **Smoke test setup.** Pick a few dozen personal files and 3 to 5 groups. Done when they sit in a test vault's `_dump/` outside the repo (or under the gitignored `sandbox/`).
+0. **Smoke test setup.** Write the 10 synthetic files with `scripts/make_smoke_vault.py`. Done when they sit in `sandbox/smoke/_dump/` (gitignored).
 1. **Scaffold.** Package layout, `types.py`, config, and group notes with three groups. Done when `p0 group add` writes a new set version.
 2. **Extractors and cards.** PDFs, slides, notebooks, code and markdown. Done when every file in the dump has a card under 3k tokens.
 3. **Jev client.** One sort call with the model pinned, shuffled options, retries on rate limits, and every request logged. Done when one made-up file comes back with probabilities in the log.
 4. **Sort and board.** `p0 sort` with the Unsorted and close-call rules, card notes written into group folders, plus `p0 board`. Done when the smoke-test files sort and print.
 5. **Corrections.** Move, freeze, unfreeze, suggest, sync, and reruns of unfrozen files only. Done when the walkthrough runs end to end (including a drag in Obsidian) and every move and confirmation is in the labels file.
-6. **Dataset and blind labels.** Download 6.867, add code files, and label everything before any sort. Done when every file has a gold label.
+   - **UI (added 2026-11-15).** `p0 ui`: the board as a local web page with drag to move, freeze, group editing, file drop and a sort button. Done when the walkthrough can be done in the browser.
+6. **Dataset and gold labels.** Download 6.867, add the 6.S191 lab files, and write gold labels from source metadata before any sort. Done when every file has a gold label.
 7. **Baselines and variants.** The three baselines and five input variants. Done when one script writes every metric for every configuration.
 8. **Decision.** Fill in the go/no-go table and carry the winning card format into Phase 1's D1.
 
 ## Open questions
 
-- [ ] Model version: pin `jev-1.14.0` (newest, out Oct 14) or `jev-1.13.0` to match the Phase 1 blueprint? Use one for both phases.
-- [ ] Starting groups and their descriptions, for the smoke test and for the course test.
-- [ ] Which public repo supplies starter code and solution files.
+- [x] Model version: `jev-1.14.0` (decided 2026-11-15). Use one for both phases.
+- [x] Starting groups: the walkthrough's groups for the smoke test; Lecture notes, Homework, Exams, Projects and Logistics for the course test (`src/decide_already/eval/groups.py`).
+- [x] Public repo for code files: the MIT 6.S191 labs.
 - [ ] Keep the starting cutoffs: Unsorted under 0.5 fits_any or 0.6 top group, close call within 0.15?
 - [ ] One group per file only, or also a yes/no tag per group for files that span two, like the project logistics sheet?
-- [ ] Should an edited file lose its freeze and be re-sorted?
-- [ ] Vault layout details: folder names (`_dump/`, `_groups/`, `.decide/`), card note naming when two files share a name, and the CLI name.
+- [ ] Should an edited file lose its freeze and be re-sorted? Implemented as yes, following "How it works" above; confirm.
+- [ ] Vault layout details: folder names (`_dump/`, `_groups/`, `.decide/`) and the CLI name. Implemented for now: a card note is named after the file's path under the dump folder, with `/` written as `__`.
 - [ ] Run CLM as a second backend in the same harness?
 - [ ] Go/no-go numbers: 90% accuracy and a 5-point margin.
 
