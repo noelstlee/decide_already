@@ -17,6 +17,112 @@
 
 Phase 0 tests one thing before any knowledge base exists: can Jev, with no reasoning LLM, sort a dump of files into groups you name? It also measures how often you have to correct it, and hands Phase 1 a working Jev client, a correction loop and the first labeled data.
 
+## Run it
+
+Everything runs from the repo root. Commands start with `uv run`, so there is no environment to activate.
+
+### Set up once
+
+1. Install [uv](https://docs.astral.sh/uv/). It brings the right Python (3.12) by itself.
+2. Install the dependencies:
+
+   ```bash
+   uv sync
+   ```
+
+3. Put your TypeSafe key in a `.env` file at the repo root (gitignored). Copy `.env.example` and fill in `TYPESAFE_API_KEY=...`. For the LLM baseline only, add `ANTHROPIC_API_KEY=...`.
+
+### Smoke test from scratch
+
+Make a vault, put the ten synthetic course files in it, and open the page:
+
+```bash
+uv run p0 init sandbox/try
+```
+
+```bash
+uv run python scripts/make_smoke_vault.py --out sandbox/try
+```
+
+```bash
+uv run p0 ui --vault sandbox/try
+```
+
+The page opens at http://127.0.0.1:8765. Stop the server with Ctrl+C in its terminal. If another server already holds that port, add `--port 8766`. A server whose terminal was closed can be stopped with:
+
+```bash
+lsof -ti tcp:8765 | xargs kill
+```
+
+Then follow the walkthrough on the page:
+
+1. Add group three times: HW, Logistics and Project. The script prints suggested covers and excludes.
+2. Sort. Expect seven files placed and three in Unsorted (the two lecture files and an apartment checklist).
+3. Add the group "Lecture slides and notes", press Freeze all on HW, and Sort again. Only unfrozen files go back to Jev, and the lecture files land in the new group.
+4. Drag `project_logistics_sheet.md` to another lane. It is now frozen and marked "Moved by you".
+5. Click any card to see what the model said and the card it read. Open original shows the file.
+
+New files come in with Add files (a file picker), by dropping them on the page, or by copying them into the vault's `_dump/` folder. Then press Sort.
+
+A full smoke run costs well under one cent. Every correction is one line in `sandbox/try/.decide/labels.jsonl`.
+
+### The same from the command line
+
+```bash
+uv run p0 group add HW --covers "homework specs, starter code, solutions, tests" --excludes "project files" --vault sandbox/try
+```
+
+```bash
+uv run p0 sort --vault sandbox/try
+```
+
+```bash
+uv run p0 board --vault sandbox/try
+```
+
+Also: `p0 group edit|rename|delete|list`, `p0 move <file> <group>`, `p0 freeze <file or group>`, `p0 unfreeze <file or group>`, `p0 suggest`, and `p0 sync` after editing notes in Obsidian. Inside a vault folder `--vault` can be left out. `uv run p0 --help` lists everything.
+
+### Tests
+
+```bash
+uv run pytest -q
+```
+
+```bash
+uv run ruff check src tests
+```
+
+The tests never call a real API and never touch `sandbox/`.
+
+### Start over
+
+A vault is only a folder. Delete it and build it again with the three commands above:
+
+```bash
+rm -rf sandbox/try
+```
+
+### What lives where
+
+| Path | Holds | Safe to delete? |
+| --- | --- | --- |
+| `sandbox/` | Everything the tool writes while you try it out (gitignored) | Yes, but see the rows below |
+| `sandbox/smoke/`, `sandbox/try/` | Smoke-test vaults | Yes |
+| `sandbox/eval/` | The evaluation vault, its gold labels and `results/` (cached answers and the report) | Deleting `results/` means paying about $0.14 to ask again |
+| `sandbox/datasets/`, `sandbox/models/` | The downloaded course files and the local embedding model | They are downloaded again when needed |
+| `smoke_test/mock_data/` | Real CS 4641/7641 files (gitignored). Nothing uses them yet | No |
+| `.env` | Your API keys | No |
+
+Inside a vault: `_dump/` holds the originals (never changed by the tool), `_groups/` one note per group, one folder per group plus `Unsorted/` holding the card notes, and `.decide/` the config (`config.yaml`), every group set version (`sets/`), every Jev call (`jev.jsonl`) and every correction (`labels.jsonl`). The layout is described under "Data model" below.
+
+### The evaluation
+
+```bash
+uv run python -m decide_already.eval.run --root sandbox/eval --dry-run
+```
+
+The dry run prints what would be asked and what it would cost. Drop `--dry-run` to run it; answers are cached, so a second run is free. Results: [phase0-results.md](phase0-results.md).
+
 ## Scope
 
 Phase 0 is one Jev call per file, a loop for correcting it, and the numbers that say whether it worked. Everything else waits for Phase 1.

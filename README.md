@@ -22,7 +22,7 @@ The decision model today is [Jev](https://docs.typesafe.ai/models) by TypeSafe A
 4. Each file gets a small markdown note in its group's folder. Open the vault in Obsidian to see the result.
 5. Drag a note to the right folder, add a group, or freeze what's right, then rerun. Only unfrozen files are re-sorted.
 
-Details: [docs/phase0.md](docs/phase0.md).
+Details: [docs/phase0.md](docs/phase0.md). To install it, run the smoke test and open the page, see [Run it](docs/phase0.md#run-it).
 
 ## Roadmap
 
