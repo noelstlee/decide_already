@@ -1,7 +1,8 @@
 """The Phase 0 experiments (build step 7): the extra sorting passes they need, and their numbers.
 
 1. Group added mid-run. Every file is sorted with one group held out
-   (eval.groups.HELD_OUT_GROUP_ID). A user then adds the group, freezes each file that sits in
+   (eval.groups.HELD_OUT_GROUP_ID), under descriptions that do not name it
+   (eval.groups.HELD_OUT_EXCLUDES). A user then adds the group, freezes each file that sits in
    its gold group, and reruns the rest against the full set.
 2. Wording of the fits-any question. The same pass with group names only, to show what the
    group descriptions add when a file fits no group.
@@ -22,7 +23,7 @@ import yaml
 from pydantic import Field, ValidationError, field_validator
 
 from ..types import Group, StrictModel
-from .groups import HELD_OUT_GROUP_ID
+from .groups import HELD_OUT_EXCLUDES, HELD_OUT_GROUP_ID
 from .metrics import Cutoffs, Prediction, outcome, top_group
 
 EDITS_FILE = "description_edits.yaml"
@@ -41,6 +42,7 @@ class Edit(StrictModel):
     covers: str
     excludes: str | None = None  # None leaves the group's excludes as it is; "" removes it
     target_file_ids: list[str] = Field(default_factory=list)  # the files it is meant to fix
+    note: str | None = None  # free text for the report: who wrote the edit, when and why
 
     @field_validator("name")
     @classmethod
@@ -110,6 +112,41 @@ def without_group(groups: Sequence[Group], group_id: str) -> list[Group]:
     return [group for group in groups if group.id != group_id]
 
 
+def reduced_groups(groups: Sequence[Group]) -> list[Group]:
+    """The groups of the held-out passes: the held-out group dropped, the others reworded.
+
+    Each remaining group listed in HELD_OUT_EXCLUDES gets the excludes text given there, which
+    does not name the held-out group. The other groups stay as they are (naming_held_out tells
+    whether one of them still names it).
+    """
+    return [
+        group.model_copy(update={"excludes": HELD_OUT_EXCLUDES[group.id]})
+        if group.id in HELD_OUT_EXCLUDES
+        else group
+        for group in without_group(groups, HELD_OUT_GROUP_ID)
+    ]
+
+
+def naming_held_out(groups: Sequence[Group]) -> list[str]:
+    """The names of the reduced set's groups whose description still names the held-out group.
+
+    `groups` is the full set. A description names the group when its covers or excludes text
+    holds the group's name as whole words, with or without a final s, capitals ignored:
+    "exams" and "exam" name Exams, "example" does not. Empty when no description names it, or
+    when the set has no such group.
+    """
+    held_out = next((group for group in groups if group.id == HELD_OUT_GROUP_ID), None)
+    if held_out is None:
+        return []
+    stem = held_out.name.strip().lower().removesuffix("s")
+    names = re.compile(rf"\b{re.escape(stem)}s?\b", re.IGNORECASE)
+    return [
+        group.name
+        for group in reduced_groups(groups)
+        if names.search(f"{group.covers} {group.excludes or ''}")
+    ]
+
+
 def with_edit(groups: Sequence[Group], edit: Edit) -> list[Group]:
     """The groups with one description edit applied. Raises ValueError for an unknown group."""
     if edit.group_id not in {group.id for group in groups}:
@@ -127,13 +164,15 @@ def with_edit(groups: Sequence[Group], edit: Edit) -> list[Group]:
 def passes(groups: Sequence[Group], edits: Sequence[Edit] | None) -> list[Pass]:
     """The extra sorting passes the experiments need under a vault's groups.
 
-    Experiments 1 and 2 need the card and the names-only configurations without the held-out
-    group. They are left out when the vault does not have that group, or has no other one.
+    Experiments 1 and 2 need the card and the names-only configurations under the reduced set
+    (see reduced_groups). The names-only pass sends no descriptions, but it runs under the same
+    groups, so both passes share one fingerprint in the cache. They are left out when the
+    vault does not have the held-out group, or has no other one.
     Experiment 3 needs the card configuration once per description edit. An edit for a group
     the vault does not have raises ValueError.
     """
     extra: list[Pass] = []
-    reduced = without_group(groups, HELD_OUT_GROUP_ID)
+    reduced = reduced_groups(groups)
     if reduced and len(reduced) < len(groups):
         for base in HELD_OUT_BASES:
             extra.append(Pass(name=held_out_name(base), base=base, groups=reduced))

@@ -9,12 +9,17 @@ gitignored. Running it again is safe: downloads are cached and unchanged files a
 Two sources fill the dump:
 
 - MIT OCW 6.867 Machine Learning, Fall 2006 (CC BY-NC-SA 4.0), from the course's zip download.
-  Its files land flat in _dump/6.867/, so a folder never gives the group away.
+  Its files land flat in _dump/6.867/, so inside the course no folder gives the group away.
 - The MIT 6.S191 labs (MIT license): notebooks, solutions and helper modules, fetched one by one
   from GitHub at a pinned commit. They keep the repository's own paths under _dump/6.S191/.
+  Every lab file has the same gold group (LABS_GROUP), so that folder does give the group
+  away: a file's path alone tells the label of every file under it.
 
 Gold labels come only from the sources' own structure (OCW's metadata, the repository's folders),
 never from a model and never from reading a file's content. They are written before any sort.
+The same structure also shows in the file names and paths the card carries (lec1.pdf,
+hw2_soln.pdf, 6.S191/lab1/...), so the labels are blind to a model's picks, not hidden from
+its input. The file-name rules baseline measures how far names and paths alone go.
 """
 
 import hashlib
@@ -462,6 +467,13 @@ Labels come from the sources' own structure. No model was asked and no file's co
 
 A file that matches no row, or rows that name two different groups, has no gold group
 (`null` in `{GOLD_FILE}`). Files without a gold group: {by_group[None]}.
+
+What a path gives away: the labels are blind to any model's picks, but they are not hidden
+from what a model is shown. The OCW files sit flat in `{OCW_FOLDER}/`, so no folder there tells
+a group, though a file's own name often does. Every one of the {len(labs)} files under
+`{LABS_FOLDER}/` has the gold group `{LABS_GROUP}` by its source, so that folder name alone
+gives their group away. The evaluation report says how many test files that covers and how
+the file-name rules, which read only names and paths, score.
 
 ## Counts
 

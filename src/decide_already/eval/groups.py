@@ -36,3 +36,12 @@ EVAL_GROUPS: list[Group] = [
 
 # The group held out, then added back, in the "group added mid-run" experiment.
 HELD_OUT_GROUP_ID = "exams"
+# What the remaining groups exclude while that group is held out, by group id: the text a user
+# would have written before thinking of an Exams group. A description that names the held-out
+# group would tell the model its files are excluded, which is the very thing the experiment
+# measures. Projects and Logistics are not listed: they keep their own text, which does not
+# name it.
+HELD_OUT_EXCLUDES: dict[str, str] = {
+    "lecture-notes": "homework",
+    "homework": "course projects",
+}

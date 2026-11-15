@@ -5,14 +5,23 @@ import pytest
 from decide_already.config import Config
 from decide_already.eval.metrics import (
     CUTOFF_GRID,
+    SIGN_TEST_ALPHA,
     Cutoffs,
     GroupMetrics,
+    Paired,
     Prediction,
+    TuningTies,
+    close_call_can_fire,
     expected_calibration_error,
+    min_discordant,
     outcome,
+    paired,
+    sign_test,
     summarize,
+    top1_right,
     top_group,
     tune_cutoffs,
+    tuning_ties,
 )
 
 DEFAULTS = Cutoffs(fits_any_below=0.5, top_below=0.6, close_margin=0.15)
@@ -149,6 +158,102 @@ def test_outcome_agrees_with_sort_decide():
             decision = sort.decide(probs, fits_any, config)
             expected = outcome(make("f", None, probs, fits_any), cutoffs)
             assert (decision.group_id, decision.close_call) == expected, (probs, fits_any)
+
+
+# close_call_can_fire
+
+
+def test_a_close_call_cannot_fire_under_the_default_cutoffs():
+    """A top of 0.6 leaves at most 0.4 for the second group: a gap of 0.2, over the 0.15 margin."""
+    assert close_call_can_fire(DEFAULTS) is False
+    # Every distribution over two or three groups in steps of 0.05, under the defaults.
+    steps = [step / 20 for step in range(21)]
+    spreads = [{"a": a, "b": 1 - a} for a in steps]
+    spreads += [{"a": a, "b": b, "c": 1 - a - b} for a in steps for b in steps if a + b <= 1]
+    assert not any(outcome(make("f", "a", probs), DEFAULTS)[1] for probs in spreads)
+
+
+def test_a_close_call_can_fire_once_the_top_cutoff_is_under_0_575():
+    """Twice the top cutoff minus the margin has to stay under 1 for the flag to have room."""
+    lower = Cutoffs(fits_any_below=0.5, top_below=0.55, close_margin=0.15)
+    assert close_call_can_fire(lower) is True
+    assert outcome(make("f", "a", {"a": 0.55, "b": 0.45}), lower) == ("a", True)
+    # Exactly at 0.575 the gap is exactly the margin, and "within" is strict.
+    on_the_line = Cutoffs(fits_any_below=0.5, top_below=0.575, close_margin=0.15)
+    assert close_call_can_fire(on_the_line) is False
+    wider = Cutoffs(fits_any_below=0.5, top_below=0.6, close_margin=0.25)
+    assert close_call_can_fire(wider) is True
+
+
+# top1_right, sign_test and paired
+
+
+def test_top1_right_is_what_summarize_counts():
+    """The same five of the eight files below are right: f1, f2, f4, f5 and f7."""
+    rights = [top1_right(prediction, LOOSE) for prediction in EIGHT]
+    assert rights == [True, True, False, True, True, False, True, False]
+    assert sum(rights) / len(EIGHT) == summarize(EIGHT, LOOSE, None).top1_accuracy
+
+
+def test_sign_test_on_hand_computed_cases():
+    """Twice the binomial tail of the smaller count, out of 2 to the number of pairs."""
+    assert sign_test(6, 0) == 2 / 64  # 0.03125
+    assert sign_test(5, 0) == 2 / 32  # 0.0625
+    assert sign_test(7, 1) == 2 * (1 + 8) / 256  # 0.0703125
+    assert sign_test(8, 1) == 2 * (1 + 9) / 512  # 0.0390625
+    assert sign_test(1, 8) == sign_test(8, 1)
+    # One file either way, an even split and no discordant file at all say nothing.
+    assert sign_test(1, 0) == 1.0
+    assert sign_test(3, 3) == 1.0
+    assert sign_test(0, 0) == 1.0
+
+
+def test_six_files_one_way_are_the_fewest_the_sign_test_separates():
+    """Five to none is 0.0625, six to none 0.031: the first count under 0.05."""
+    assert SIGN_TEST_ALPHA == 0.05
+    assert min_discordant() == 6
+    assert sign_test(5, 0) >= SIGN_TEST_ALPHA > sign_test(6, 0)
+    assert min_discordant(0.01) == 8  # 2 / 128 is 0.016, 2 / 256 is 0.008
+
+
+def test_paired_counts_the_discordant_files_each_way():
+    """Five files both answered: a1 and a2 only the first got right, b1 only the second."""
+    first = [
+        make("a1", "a", {"a": 0.9, "b": 0.1}),
+        make("a2", "a", {"a": 0.9, "b": 0.1}),
+        make("b1", "b", {"a": 0.9, "b": 0.1}),
+        make("both", "a", {"a": 0.9, "b": 0.1}),
+        make("neither", "b", {"a": 0.9, "b": 0.1}),
+    ]
+    second = [
+        make("a1", "a", {"a": 0.1, "b": 0.9}),
+        make("a2", "a", {"a": 0.1, "b": 0.9}),
+        make("b1", "b", {"a": 0.1, "b": 0.9}),
+        make("both", "a", {"a": 0.9, "b": 0.1}),
+        make("neither", "b", {"a": 0.9, "b": 0.1}),
+    ]
+    assert paired(first, second, DEFAULTS) == Paired(
+        n=5, first_right=3, second_right=2, only_first=2, only_second=1, p_value=1.0
+    )
+    assert paired(second, first, DEFAULTS).only_first == 1
+
+
+def test_paired_leaves_out_a_file_only_one_of_the_two_answered():
+    """The first failed on f3, the one file the second got wrong: on f1 and f2 they tie."""
+    first = [make("f1", "a", {"a": 1.0}), make("f2", "a", {"a": 1.0})]
+    second = [*first, make("f3", "a", {"b": 1.0})]
+    assert paired(first, second, DEFAULTS) == Paired(
+        n=2, first_right=2, second_right=2, only_first=0, only_second=0, p_value=1.0
+    )
+    assert paired([], second, DEFAULTS).n == 0
+
+
+def test_paired_counts_a_file_with_no_gold_group_by_where_the_cutoffs_put_it():
+    """Unsorted is right for it, so the configuration that holds it back gets it right."""
+    held_back = [make("x", None, {"a": 0.9, "b": 0.1}, fits_any=0.1)]
+    placed = [make("x", None, {"a": 0.9, "b": 0.1}, fits_any=0.9)]
+    result = paired(held_back, placed, DEFAULTS)
+    assert (result.first_right, result.second_right, result.only_first) == (1, 0, 1)
 
 
 # expected_calibration_error
@@ -537,3 +642,34 @@ def test_tune_cutoffs_with_no_dev_predictions_returns_the_defaults():
     assert tune_cutoffs([], DEFAULTS) == DEFAULTS
     off_grid = Cutoffs(fits_any_below=0.52, top_below=0.61, close_margin=0.15)
     assert tune_cutoffs([], off_grid) == off_grid
+
+
+# tuning_ties
+
+
+def test_tuning_ties_counts_the_pairs_that_share_the_best_score():
+    """On DEV six pairs reach +4: fits_any 0.6, 0.65 or 0.7 with top 0.5 or 0.55."""
+    assert tuning_ties(DEV, DEFAULTS) == TuningTies(pairs=361, tied=6, defaults_tied=False)
+
+
+def test_tuning_ties_when_the_dev_split_cannot_tell_the_cutoffs_apart():
+    """One sure, right file is placed under every pair on the grid, so all 361 tie for best."""
+    sure = [make("d1", "a", {"a": 1.0, "b": 0.0}, fits_any=1.0)]
+    assert tuning_ties(sure, DEFAULTS) == TuningTies(pairs=361, tied=361, defaults_tied=True)
+    # With no dev predictions at all every pair scores 0.
+    assert tuning_ties([], DEFAULTS) == TuningTies(pairs=361, tied=361, defaults_tied=True)
+
+
+def test_tuning_ties_scores_defaults_that_are_not_on_the_grid_too():
+    """Off-grid defaults are one more pair, as tune_cutoffs scores them."""
+    off_grid = Cutoffs(fits_any_below=0.52, top_below=0.61, close_margin=0.15)
+    sure = [make("d1", "a", {"a": 1.0, "b": 0.0}, fits_any=1.0)]
+    assert tuning_ties(sure, off_grid) == TuningTies(pairs=362, tied=362, defaults_tied=True)
+    # Two files that only a fits_any cutoff of 0.52 splits: the defaults score +2. On the grid,
+    # 0.5 or under places both (0) and 0.55 or over places neither (+1), so nothing ties them.
+    close_pair = [
+        make("d1", None, {"a": 0.9, "b": 0.1}, fits_any=0.51),
+        make("d2", "a", {"a": 0.9, "b": 0.1}, fits_any=0.53),
+    ]
+    alone = Cutoffs(fits_any_below=0.52, top_below=0.6, close_margin=0.15)
+    assert tuning_ties(close_pair, alone) == TuningTies(pairs=362, tied=1, defaults_tied=True)

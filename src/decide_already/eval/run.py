@@ -15,10 +15,11 @@ The experiments (experiments.py) add passes: a Jev configuration run again under
 groups. A pass runs after the configurations, when the one it copies is in the run.
 
 Every Jev request, those of the passes included, goes through one JevBackend that logs to the
-vault's own Jev log, so the vault's spend cap covers the whole evaluation. When the cap is
-reached the run stops asking, still writes the report from what is cached, and exits with
-status 2. A configuration whose backend cannot be built (Jev or the LLM without a key) is
-pending: it is skipped, and the report says why.
+vault's own Jev log, so the vault's spend cap covers the whole evaluation. When a backend says
+the run must stop (RunStopped: the cap is reached, or the call log cannot be written), the run
+stops asking, still writes the report from what is cached, says why, and exits with status 2.
+A configuration whose backend cannot be built (Jev or the LLM without a key) is pending: it is
+skipped, and the report says why.
 
 Cards are built in the main thread, once per file and variant, because PyMuPDF is not safe
 across threads. Jev requests then run in a thread pool; the other backends run one at a time.
@@ -36,7 +37,7 @@ from pydantic import Field
 
 from .. import vault
 from ..backends import make_backend
-from ..backends.base import Backend, BackendError, BudgetExceeded, SortResult
+from ..backends.base import Backend, BackendError, RunStopped, SortResult
 from ..card import Card, build_card
 from ..config import JEV_LOG_FILE, Config, decide_path
 from ..log import read_jsonl, total_input_tokens
@@ -75,7 +76,7 @@ QUESTION_TOKENS = 700  # about what the two questions and the group descriptions
 DEFAULT_ROOT = "sandbox/eval"
 DEFAULT_WORKERS = 6
 EXIT_ERROR = 1
-EXIT_BUDGET = 2  # the spend cap stopped the run
+EXIT_STOPPED = 2  # a backend stopped the run: the spend cap, or a call log that cannot be written
 
 # One step of a run: a configuration name, the groups to sort into, and the set version to log.
 Job = tuple[str, list[Group], int]
@@ -202,13 +203,13 @@ def _ask(
     """Ask a backend about one file and make its cache row: the answer, or the failure.
 
     This runs in a worker thread. `fixed` holds the row's fields that do not depend on the
-    answer. The spend cap says nothing about the file, so BudgetExceeded is passed on for the
-    run to stop on.
+    answer. A RunStopped (the spend cap, a call log that cannot be written) says nothing about
+    the file, so it is passed on for the run to stop on.
     """
     per_state: list[SortResult] = []
     try:
         result = judge(card, groups, set_version, backend, variant, per_state)
-    except BudgetExceeded:
+    except RunStopped:
         raise
     except BackendError as error:
         return Row(**fixed, error=str(error))
@@ -265,7 +266,7 @@ class Evaluation:
                 f"({len(missing)} in all, the first is {missing[0]})"
             )
         self.pending: dict[str, str] = {}  # configuration name to why it has no backend
-        self.stopped: str | None = None  # the spend cap's message, once it has stopped the run
+        self.stopped: str | None = None  # why a backend stopped the run, once one has
         self._cards: dict[tuple[str, str], Card] = {}
         self._backends: dict[str, Backend] = {}
 
@@ -329,8 +330,8 @@ class Evaluation:
         groups and 0 for an experiment pass. The cache file is rewritten after every answer.
         A request that fails is cached with its error and tried again on the next run. When
         the backend cannot be built, the configuration is noted as pending and nothing is
-        written. When the spend cap is reached, `stopped` is set and the files not yet asked
-        are left for a later run.
+        written. When a backend stops the run (RunStopped), `stopped` is set to its message
+        and the files not yet asked are left for a later run.
 
         Returns one line for the terminal that says what was done.
         """
@@ -358,6 +359,9 @@ class Evaluation:
         if jobs:
             try:
                 backend = self.backend(backend_key)
+            except RunStopped as error:
+                self.stopped = str(error)
+                return f"{name}: stopped ({error})"
             except BackendError as error:
                 self.pending[name] = str(error)
                 return f"{name}: pending ({error})"
@@ -375,7 +379,7 @@ class Evaluation:
                         continue
                     try:
                         row = future.result()
-                    except BudgetExceeded as error:
+                    except RunStopped as error:
                         self.stopped = str(error)
                         for other in futures:
                             other.cancel()
@@ -390,7 +394,7 @@ class Evaluation:
             f"{name}: asked {asked}, failed {failed}, no text {len(todo) - len(jobs)}, "
             f"already cached {len(self.labels) - len(todo)}"
         )
-        return f"{line}, stopped by the spend cap" if self.stopped else line
+        return f"{line}, stopped ({self.stopped})" if self.stopped else line
 
     def answers(self, name: str, groups: list[Group], set_version: int) -> Answers:
         """What a configuration has cached for this run's files under these groups.
@@ -503,7 +507,7 @@ def dry_run(evaluation: Evaluation, plan: list[Job]) -> str:
 
 
 class _Parser(argparse.ArgumentParser):
-    """An argument parser whose usage errors exit with status 1: 2 means the spend cap here."""
+    """An argument parser whose usage errors exit with status 1: 2 means a stopped run here."""
 
     def error(self, message: str) -> NoReturn:
         """Print the problem as one line and exit with status 1."""
@@ -550,8 +554,9 @@ def _arguments(argv: list[str] | None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     """Run the evaluation, or its dry run, from the command line. Returns the exit status.
 
-    0 when the run finished, 1 for a problem with the arguments or the vault, and 2 when the
-    spend cap stopped the run (the report is still written from what is cached).
+    0 when the run finished, 1 for a problem with the arguments or the vault, and 2 when a
+    backend stopped the run: the spend cap was reached, or the call log could not be written.
+    The report is still written from what is cached, and the reason is printed.
     """
     args = _arguments(argv)
     try:
@@ -591,10 +596,11 @@ def main(argv: list[str] | None = None) -> int:
     if evaluation.stopped:
         print(f"stopped: {evaluation.stopped}", file=sys.stderr)
         print(
-            "The report covers what is cached. Raise max_spend_usd and run again to finish.",
+            "The report covers what is cached. Fix the cause (for the spend cap, raise "
+            "max_spend_usd) and run again to finish.",
             file=sys.stderr,
         )
-        return EXIT_BUDGET
+        return EXIT_STOPPED
     return 0
 
 

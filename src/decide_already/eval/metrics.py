@@ -13,6 +13,8 @@ from ..types import StrictModel
 
 # The values tried for each tuned cutoff: 0.0, 0.05, and so on up to 0.9.
 CUTOFF_GRID = [round(step * 0.05, 2) for step in range(19)]
+# Two configurations are separable when the sign test on their discordant files is under this.
+SIGN_TEST_ALPHA = 0.05
 
 
 class Prediction(StrictModel):
@@ -73,6 +75,25 @@ class Metrics(StrictModel):
     latency_p95_ms: float | None
 
 
+class Paired(StrictModel):
+    """Two configurations compared file by file, on the files both answered. See paired."""
+
+    n: int  # files both answered
+    first_right: int  # of those, the files the first got right on top-1
+    second_right: int
+    only_first: int  # discordant files: the first got them right and the second did not
+    only_second: int  # discordant files the other way
+    p_value: float  # exact two-sided sign test on the discordant files; 1.0 when there are none
+
+
+class TuningTies(StrictModel):
+    """How flat the cutoff tuning is on a dev split. See tuning_ties."""
+
+    pairs: int  # the pairs of cutoffs scored: the grid, plus the defaults when they are off it
+    tied: int  # how many of them share the best score
+    defaults_tied: bool  # whether the defaults are one of those
+
+
 def top_group(probs: dict[str, float]) -> str | None:
     """The group with the highest probability; a tie goes to the lower group id. None if empty."""
     if not probs:
@@ -96,6 +117,74 @@ def outcome(prediction: Prediction, cutoffs: Cutoffs) -> tuple[str | None, bool]
     if top_prob < cutoffs.top_below:
         return None, False
     return top, top_prob - second_prob < cutoffs.close_margin
+
+
+def close_call_can_fire(cutoffs: Cutoffs) -> bool:
+    """Whether these cutoffs can flag a close call at all when probabilities sum to 1 or less.
+
+    A close call needs a top probability of at least top_below and a second one within
+    close_margin of it. Two such probabilities add up to more than 2 * top_below - close_margin.
+    When that is 1 or more, no distribution has room for both, so the flag can never fire
+    (with the defaults: 2 * 0.6 - 0.15 = 1.05).
+    """
+    return 2 * cutoffs.top_below - cutoffs.close_margin < 1 - 1e-9
+
+
+def top1_right(prediction: Prediction, cutoffs: Cutoffs) -> bool:
+    """Whether one file counts as right on top-1, in the sense summarize uses.
+
+    Right when the top group is the gold group. A file with no gold group is right only when
+    the cutoffs send it to Unsorted.
+    """
+    if prediction.gold is None:
+        return outcome(prediction, cutoffs)[0] is None
+    return top_group(prediction.probs) == prediction.gold
+
+
+def sign_test(first: int, second: int) -> float:
+    """The exact two-sided sign test on discordant pairs, as a p-value.
+
+    `first` and `second` count the pairs that went each way. If neither side were better, each
+    discordant pair would go either way with chance one half. The p-value is the chance of a
+    split at least as uneven as this one: twice the binomial tail of the smaller count, capped
+    at 1. With no discordant pair it is 1.0. Six to none gives 0.031, the smallest count under
+    0.05; five to none gives 0.0625.
+    """
+    total = first + second
+    if total == 0:
+        return 1.0
+    tail = sum(math.comb(total, count) for count in range(min(first, second) + 1))
+    return min(1.0, 2 * tail / 2**total)
+
+
+def min_discordant(alpha: float = SIGN_TEST_ALPHA) -> int:
+    """The fewest discordant files, all one way, that sign_test puts under alpha (6 for 0.05)."""
+    count = 1
+    while sign_test(count, 0) >= alpha:
+        count += 1
+    return count
+
+
+def paired(first: Sequence[Prediction], second: Sequence[Prediction], cutoffs: Cutoffs) -> Paired:
+    """Compare two configurations file by file, on the files both answered.
+
+    Only the discordant files, the ones just one of the two got right on top-1, can tell the
+    two apart: the sign test is taken over them. Files that only one configuration answered
+    are left out, so an error in one row never counts for or against the other.
+    """
+    others = {prediction.file_id: prediction for prediction in second}
+    both = [(mine, others[mine.file_id]) for mine in first if mine.file_id in others]
+    rights = [(top1_right(mine, cutoffs), top1_right(other, cutoffs)) for mine, other in both]
+    only_first = sum(mine and not other for mine, other in rights)
+    only_second = sum(other and not mine for mine, other in rights)
+    return Paired(
+        n=len(both),
+        first_right=sum(mine for mine, _ in rights),
+        second_right=sum(other for _, other in rights),
+        only_first=only_first,
+        only_second=only_second,
+        p_value=sign_test(only_first, only_second),
+    )
 
 
 def expected_calibration_error(
@@ -252,6 +341,33 @@ def tune_cutoffs(dev_predictions: Sequence[Prediction], defaults: Cutoffs) -> Cu
             if key < best_key:
                 best, best_key = candidate, key
     return best
+
+
+def tuning_ties(dev_predictions: Sequence[Prediction], defaults: Cutoffs) -> TuningTies:
+    """Count the pairs of cutoffs that share the best score on the dev split.
+
+    The pairs are the ones tune_cutoffs scores: every pair on CUTOFF_GRID, plus the defaults
+    when they are not on the grid. When the defaults are among several pairs that tie for
+    best, the dev split cannot tell those cutoffs apart, and tune_cutoffs returns the defaults
+    only because they win ties. With no dev predictions every pair ties.
+    """
+    pairs = {
+        (fits_any_below, top_below) for fits_any_below in CUTOFF_GRID for top_below in CUTOFF_GRID
+    }
+    pairs.add((defaults.fits_any_below, defaults.top_below))
+    scores = {
+        pair: _net_right(
+            dev_predictions,
+            defaults.model_copy(update={"fits_any_below": pair[0], "top_below": pair[1]}),
+        )
+        for pair in pairs
+    }
+    best = max(scores.values())
+    return TuningTies(
+        pairs=len(pairs),
+        tied=sum(score == best for score in scores.values()),
+        defaults_tied=scores[(defaults.fits_any_below, defaults.top_below)] == best,
+    )
 
 
 def _net_right(predictions: Sequence[Prediction], cutoffs: Cutoffs) -> int:

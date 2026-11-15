@@ -623,6 +623,28 @@ def test_dataset_notes_list_sources_licenses_mapping_and_counts(built, course_zi
     assert chr(8212) not in notes  # 8212 is the em dash, which the project never writes
 
 
+def test_dataset_notes_say_which_folder_gives_the_group_away(built):
+    """Every lab file is homework by its source, so the 6.S191 folder name tells the label."""
+    labels = dataset.read_gold(built / "eval")
+    labs = [label for label in labels if label.file_id.startswith("6.S191/")]
+    assert {label.gold_group for label in labs} == {"homework"}
+    notes = " ".join((built / "eval" / "DATASET.md").read_text().split())
+    assert (
+        f"Every one of the {len(labs)} files under `6.S191/` has the gold group `homework` by "
+        "its source, so that folder name alone gives their group away."
+    ) in notes
+    assert "The OCW files sit flat in `6.867/`, so no folder there tells a group" in notes
+    assert "they are not hidden from what a model is shown" in notes
+
+
+def test_the_module_docstring_says_that_the_labs_folder_gives_the_group_away():
+    """Only the course's own files sit flat. The labs keep a folder that tells the label."""
+    doc = " ".join(dataset.__doc__.split())
+    assert "a folder never gives the group away" not in doc
+    assert "so inside the course no folder gives the group away" in doc
+    assert "so that folder does give the group away" in doc
+
+
 # The network step and the command line
 
 

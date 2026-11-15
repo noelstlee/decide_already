@@ -1,7 +1,8 @@
 """File-name rules baseline: keywords and extensions, no content and no model.
 
-The default rules were written blind, from general knowledge of how course files are named,
-before looking at any evaluation file. The baseline reads only a file's name and path.
+The default rules were written from general knowledge of how course files are named. The
+agent that wrote them was told not to look at the evaluation files first; the repo cannot
+show that it did not. The baseline reads only a file's name and path.
 """
 
 import re
