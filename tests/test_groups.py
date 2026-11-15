@@ -125,3 +125,11 @@ def test_find_vault_walks_up(root, tmp_path_factory):
     assert vault.find_vault(root / "HW") == root.resolve()
     with pytest.raises(FileNotFoundError):
         vault.find_vault(tmp_path_factory.mktemp("elsewhere"))
+
+
+def test_an_empty_vault_has_no_set_version_yet(root):
+    result = vault.sync_group_set(root)
+    assert result.version == 0
+    assert result.groups == []
+    assert list((root / ".decide" / "sets").iterdir()) == []
+    assert vault.add_group(root, "HW", "homework").version == 1

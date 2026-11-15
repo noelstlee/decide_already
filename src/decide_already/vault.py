@@ -138,6 +138,8 @@ def sync_group_set(root: Path) -> GroupSet:
     """Read the group notes; if they differ from the latest set version, write the next one."""
     groups = read_groups(root)
     current = latest_set(root)
+    if current is None and not groups:
+        return GroupSet(version=0, groups=[])  # nothing defined yet, so nothing to record
     if current is not None and current.groups == groups:
         return current
     new = GroupSet(version=1 if current is None else current.version + 1, groups=groups)
