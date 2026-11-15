@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light dark">
+    <title>decide_already</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="/static/style.css">
+    <script src="/static/app.js" defer></script>
+  </head>
+  <body>
+    <header class="top">
+      <div class="top-vault">
+        <h1 id="vault-name">decide_already</h1>
+        <ul id="meta" class="meta" aria-label="About this vault" hidden>
+          <li title="Every change to a group makes a new version of the set">
+            Set version <span id="meta-set" class="meta-value"></span>
+          </li>
+          <li title="The exact model version every file is sorted with">
+            Model <span id="meta-model" class="meta-value"></span>
+          </li>
+          <li title="What sorting has cost so far, and the cap in the vault config">
+            Spent <span id="meta-spend" class="meta-value"></span>
+          </li>
+        </ul>
+      </div>
+      <div class="top-actions">
+        <span id="pending" class="pending" hidden></span>
+        <button id="add-group" type="button" class="button" data-key="add-group" disabled>
+          Add group
+        </button>
+        <button id="sort" type="button" class="button primary sort" data-key="sort" disabled>
+          <span id="sort-fill" class="sort-fill"></span>
+          <span id="sort-label" class="sort-label">Sort</span>
+        </button>
+      </div>
+    </header>
+
+    <main class="work">
+      <div id="board" class="board"></div>
+      <aside
+        id="panel"
+        class="panel"
+        tabindex="-1"
+        aria-label="File details"
+        data-scroll="panel"
+        hidden
+      ></aside>
+    </main>
+
+    <div id="drop-overlay" class="drop-overlay" hidden>
+      <div class="drop-box">
+        <p class="drop-title">Drop to add to the dump folder</p>
+        <p class="drop-sub">The files are copied in. Press Sort afterwards to place them.</p>
+      </div>
+    </div>
+
+    <div id="toasts" class="toasts" role="status" aria-live="polite"></div>
+
+    <noscript><p class="notice">This page needs JavaScript to show the board.</p></noscript>
+  </body>
+</html>

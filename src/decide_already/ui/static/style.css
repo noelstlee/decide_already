@@ -1,0 +1,831 @@
+/* The board page. System fonts, a neutral palette and one accent color (ink blue).
+   Light and dark follow the system setting. No images, no fonts, nothing loaded from outside. */
+
+:root {
+  color-scheme: light dark;
+  --bg: #f4f5f7; /* the page */
+  --lane: #ebedf1; /* a column */
+  --surface: #ffffff; /* cards, the side panel, inputs */
+  --text: #1b1e25;
+  --muted: #5a6270; /* secondary text */
+  --line: #d8dce3; /* hairlines */
+  --edge: #7d8594; /* borders of things you can press or type in */
+  --dash: #b4bac6; /* dashed outlines: the Unsorted lane, a hint */
+  --track: #dfe3ea; /* the empty part of a probability bar */
+  --accent: #2747b5;
+  --accent-strong: #1d3893;
+  --accent-soft: #e6ebfa;
+  --on-accent: #ffffff;
+  --sort-fill: rgba(255, 255, 255, 0.24); /* progress inside the Sort button */
+  --veil: rgba(244, 245, 247, 0.92); /* behind the drop message */
+  --shadow: 0 8px 28px rgba(20, 26, 40, 0.16);
+  --radius: 6px;
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #121418;
+    --lane: #191c22;
+    --surface: #22262e;
+    --text: #e7e9ee;
+    --muted: #a0a8b6;
+    --line: #313743;
+    --edge: #737c8c;
+    --dash: #4d5565;
+    --track: #3a4150;
+    --accent: #9db1ff;
+    --accent-strong: #b7c6ff;
+    --accent-soft: #262f4d;
+    --on-accent: #0f1530;
+    --sort-fill: rgba(15, 21, 48, 0.2);
+    --veil: rgba(18, 20, 24, 0.92);
+    --shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
+  }
+}
+
+/* Base */
+
+* {
+  box-sizing: border-box;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden; /* the page itself never scrolls: the lanes and the side panel do */
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.45 var(--font);
+  -webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2,
+h3,
+h4,
+p,
+ul {
+  margin: 0;
+}
+
+ul {
+  padding: 0;
+  list-style: none;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Text for screen readers only. */
+.sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* Buttons */
+
+.button {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 7px 14px;
+  border: 1px solid var(--edge);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.25;
+  text-decoration: none;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.button:hover {
+  border-color: var(--text);
+}
+
+.button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.button:disabled:hover {
+  border-color: var(--edge);
+}
+
+.button.primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--on-accent);
+  font-weight: 600;
+}
+
+.button.primary:hover {
+  border-color: var(--accent-strong);
+  background: var(--accent-strong);
+}
+
+.button.primary:disabled:hover {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+/* A button that reads as plain text until you point at it. */
+.button.quiet {
+  margin: 0 -6px;
+  padding: 3px 6px;
+  border-color: transparent;
+  background: none;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.button.quiet:hover {
+  border-color: transparent;
+  color: var(--text);
+  text-decoration: underline;
+}
+
+.button.quiet:disabled:hover {
+  color: var(--muted);
+  text-decoration: none;
+}
+
+/* Header */
+
+.top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px 32px;
+  padding: 18px 24px 16px;
+}
+
+.top-vault {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 28px;
+  min-width: 0;
+}
+
+.top h1 {
+  max-width: 40vw;
+  overflow: hidden;
+  font-size: 20px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 22px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.meta-value {
+  margin-left: 3px;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.top-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.pending {
+  margin-right: 4px;
+  color: var(--muted);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* The Sort button fills from the left while a sort runs. */
+.sort {
+  position: relative;
+  min-width: 84px;
+  overflow: hidden;
+}
+
+.sort-fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 0;
+  background: var(--sort-fill);
+  transition: width 0.3s ease;
+}
+
+.sort-label {
+  position: relative;
+  font-variant-numeric: tabular-nums;
+}
+
+.sort[aria-busy="true"] {
+  min-width: 156px;
+  opacity: 1;
+  cursor: progress;
+}
+
+/* Board */
+
+.work {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.board {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.notice {
+  margin: 0 24px 14px;
+  padding: 10px 14px;
+  border: 1px dashed var(--dash);
+  border-radius: var(--radius);
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.quiet-note {
+  padding: 24px;
+  color: var(--muted);
+}
+
+/* The first screen of a new vault, and the screen for a board that did not load. */
+.invite {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 14px;
+  width: min(480px, calc(100% - 48px));
+  margin: 12vh auto 0;
+}
+
+.invite h2 {
+  font-size: 24px;
+  font-weight: 650;
+  letter-spacing: -0.015em;
+}
+
+.invite p {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.lanes {
+  flex: 1;
+  display: flex;
+  gap: 14px;
+  min-height: 0;
+  padding: 2px 24px 24px;
+  overflow-x: auto;
+}
+
+.lane {
+  flex: 0 0 272px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: var(--lane);
+}
+
+/* Unsorted is not a group, so its lane is an outline. */
+.lane.unsorted {
+  border: 1px dashed var(--dash);
+  background: none;
+}
+
+/* The lane a dragged card would land in. */
+.lane.drop {
+  border: 1px solid var(--accent);
+  background: var(--accent-soft);
+}
+
+.lane-head {
+  flex: none;
+  padding: 14px 14px 8px;
+}
+
+.lane-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.lane-title h2 {
+  font-size: 15px;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.count {
+  color: var(--muted);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.lane-covers,
+.lane-excludes {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.lane-actions {
+  display: flex;
+  gap: 16px;
+  min-height: 22px;
+  margin-top: 8px;
+}
+
+.cards {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  padding: 4px 10px 12px; /* room at the top for the focus ring of the first card */
+  overflow-y: auto;
+}
+
+.empty {
+  padding: 20px 8px;
+  color: var(--muted);
+  font-size: 13px;
+  text-align: center;
+}
+
+/* Cards */
+
+.card {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 10px 12px 11px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  cursor: pointer;
+}
+
+.card:hover {
+  border-color: var(--edge);
+}
+
+.card.selected {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+/* A card that is being dragged, or whose move the server has not answered yet. */
+.card.lifted {
+  opacity: 0.45;
+}
+
+.card-name {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.card-folder {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.card-type,
+.card-reason {
+  font-size: 12.5px;
+}
+
+.card-type {
+  color: var(--muted);
+}
+
+.card-prob {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 5px;
+}
+
+/* A probability, drawn as a length. */
+.bar {
+  flex: 1;
+  height: 3px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: var(--track);
+}
+
+.bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--accent);
+}
+
+.num {
+  color: var(--muted);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* On a card the number can come with a group name. The bar keeps some length either way. */
+.card-prob .bar {
+  min-width: 48px;
+}
+
+.card-prob .num {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.marks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 5px;
+}
+
+.mark {
+  padding: 3px 6px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+/* The one mark that asks to be looked at: a close call. */
+.mark.accent {
+  border-color: transparent;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* The group form, in a lane's head */
+
+.group-form {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.field-label {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.field-hint {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+input[type="text"],
+select,
+textarea {
+  width: 100%;
+  padding: 7px 9px;
+  border: 1px solid var(--edge);
+  border-radius: var(--radius);
+  background: var(--surface);
+  font-size: 14px;
+}
+
+textarea {
+  min-height: 60px;
+  line-height: 1.4;
+  resize: vertical;
+}
+
+.form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+}
+
+.form-actions .quiet {
+  margin-left: auto;
+}
+
+.confirm p {
+  margin-bottom: 10px;
+  font-size: 13.5px;
+  overflow-wrap: anywhere;
+}
+
+/* Side panel */
+
+.panel {
+  flex: 0 0 min(420px, 46vw);
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  padding: 20px 22px 32px;
+  overflow-y: auto;
+  border-left: 1px solid var(--line);
+  background: var(--surface);
+  animation: panel-in 0.16s ease-out;
+}
+
+.panel > * {
+  flex: none;
+}
+
+.panel:focus-visible {
+  outline-offset: -2px;
+}
+
+@keyframes panel-in {
+  from {
+    opacity: 0;
+    transform: translateX(14px);
+  }
+}
+
+.panel-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.panel-title {
+  font-size: 17px;
+  font-weight: 650;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.panel-sub {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.panel-status {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 14px;
+}
+
+.panel-status .frozen-line {
+  color: var(--muted);
+}
+
+.panel-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.move {
+  flex: 1 1 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.move label {
+  color: var(--muted);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.move select {
+  flex: 1;
+  min-width: 0;
+}
+
+.panel-section h3 {
+  margin-bottom: 10px;
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.panel-section h4 {
+  margin: 12px 0 4px;
+  color: var(--muted);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.prob {
+  display: grid;
+  grid-template-columns: minmax(0, 40%) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 3px 0;
+  font-size: 14px;
+}
+
+.prob .bar {
+  height: 5px;
+  border-radius: 3px;
+}
+
+.prob-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The group the file is in now. */
+.prob.current .prob-name {
+  font-weight: 650;
+}
+
+/* "Fits any group" is a second question, so it sits apart from the groups. */
+.fits {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.explain {
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.saw-title {
+  font-size: 13.5px;
+  overflow-wrap: anywhere;
+}
+
+/* Text taken from the file, shown exactly as the card note has it. */
+.card-text {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  background: var(--bg);
+  font: 12.5px/1.5 var(--mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Dropping files from the desktop */
+
+.drop-overlay {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 30;
+  display: flex;
+  padding: 28px;
+  background: var(--veil);
+}
+
+.drop-box {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 2px dashed var(--accent);
+  border-radius: 14px;
+  text-align: center;
+  pointer-events: none;
+}
+
+.drop-title {
+  font-size: 24px;
+  font-weight: 650;
+  letter-spacing: -0.015em;
+}
+
+.drop-sub {
+  color: var(--muted);
+}
+
+/* Messages that go away by themselves */
+
+.toasts {
+  position: fixed;
+  bottom: 24px;
+  left: 24px;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: min(480px, calc(100vw - 48px));
+}
+
+.toast {
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  font-size: 14px;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+  animation: toast-in 0.18s ease-out;
+}
+
+/* An error is the same message with the colors turned around. */
+.toast.error {
+  border-color: var(--text);
+  background: var(--text);
+  color: var(--bg);
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+}
+
+/* Narrow windows: the panel covers the board. The page is made for about 900 pixels and up. */
+@media (max-width: 760px) {
+  .panel {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 20;
+    border-left: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}

@@ -1,8 +1,11 @@
 """The p0 command line.
 
 Each command is a thin wrapper over vault.py, sort.py, board.py or corrections.py.
+`p0 ui` serves the same functions as a local web page (ui/server.py).
 """
 
+import socket
+import webbrowser
 from pathlib import Path
 from typing import Annotated
 
@@ -321,3 +324,35 @@ def sync_edits(vault_path: VaultOption = None) -> None:
         )
     elif not new_set:
         typer.echo("Nothing to pick up.")
+
+
+@app.command("ui")
+def serve_ui(
+    port: Annotated[int, typer.Option(help="Port to serve the page on.")] = 8765,
+    no_open: Annotated[bool, typer.Option("--no-open", help="Do not open the browser.")] = False,
+    vault_path: VaultOption = None,
+) -> None:
+    """Show the board as a web page, served on this machine only (127.0.0.1)."""
+    root = _vault_root(vault_path)
+    # Imported here so that the other commands do not load the web server.
+    import uvicorn
+
+    from .ui.server import create_app
+
+    # The port is taken before the browser opens, so the page's first request is never refused.
+    listener = socket.socket()
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    with listener:
+        try:
+            listener.bind(("127.0.0.1", port))
+        except OSError as error:
+            _fail(f"port {port} cannot be used ({error.strerror}); pass another with --port")
+        listener.listen()
+        url = f"http://127.0.0.1:{port}"
+        typer.echo(f"Board of {root.name}: {url} (Ctrl+C stops it)")
+        if not no_open:
+            webbrowser.open(url)
+        try:
+            uvicorn.Server(uvicorn.Config(create_app(root), log_level="warning")).run([listener])
+        except KeyboardInterrupt:
+            pass  # Ctrl+C is how the server is meant to be stopped
