@@ -285,9 +285,13 @@ Phase 0 passes if the card-based sort beats file-name rules and embedding simila
 | Full text or window vote beats the card by 5 points or more | Use that input for D1 |
 | Jev doesn't beat embedding similarity | Rethink Jev's role on the write path before Phase 1 |
 
+Added 2026-11-15 (proposed): "above" and "beats" are judged file by file, on the files both configurations answered, with an exact sign test on the files only one of them got right. The report can therefore answer "not separable" or "cannot be told" as well as yes and no.
+
 ## Build order
 
 Steps 0 to 4 fit in one night. The go/no-go call is proposed for 2026-11-01, the day before Phase 1's ingest calls start.
+
+Status on 2026-11-15: steps 0 to 7 and the UI are built and have run against the real API. The numbers, what they can support and a recommendation are in [phase0-results.md](phase0-results.md). Step 8, the decision, is Stan's, and the proposed date has passed.
 
 0. **Smoke test setup.** Write the 10 synthetic files with `scripts/make_smoke_vault.py`. Done when they sit in `sandbox/smoke/_dump/` (gitignored).
 1. **Scaffold.** Package layout, `types.py`, config, and group notes with three groups. Done when `p0 group add` writes a new set version.
@@ -305,7 +309,7 @@ Steps 0 to 4 fit in one night. The go/no-go call is proposed for 2026-11-01, the
 - [x] Model version: `jev-1.14.0` (decided 2026-11-15). Use one for both phases.
 - [x] Starting groups: the walkthrough's groups for the smoke test; Lecture notes, Homework, Exams, Projects and Logistics for the course test (`src/decide_already/eval/groups.py`).
 - [x] Public repo for code files: the MIT 6.S191 labs.
-- [ ] Keep the starting cutoffs: Unsorted under 0.5 fits_any or 0.6 top group, close call within 0.15?
+- [ ] Keep the starting cutoffs: Unsorted under 0.5 fits_any or 0.6 top group, close call within 0.15? Found 2026-11-15: with these three numbers a close call can never happen (a top of 0.6 leaves at most 0.4 for the second group, a gap of 0.2). See [phase0-results.md](phase0-results.md).
 - [ ] One group per file only, or also a yes/no tag per group for files that span two, like the project logistics sheet?
 - [ ] Should an edited file lose its freeze and be re-sorted? Implemented as yes, following "How it works" above; confirm.
 - [ ] Vault layout details: folder names (`_dump/`, `_groups/`, `.decide/`) and the CLI name. Implemented for now: a card note is named after the file's path under the dump folder, with `/` written as `__`.
