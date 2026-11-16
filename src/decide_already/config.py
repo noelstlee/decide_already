@@ -2,6 +2,7 @@
 
 import os
 import re
+import secrets
 import unicodedata
 from pathlib import Path
 from typing import Literal
@@ -155,9 +156,22 @@ class Config(StrictModel):
     def save(self, vault: Path) -> None:
         """Write this config to the vault, creating .decide/ if needed."""
         self.path(vault).parent.mkdir(parents=True, exist_ok=True)
-        self.path(vault).write_text(
-            yaml.safe_dump(self.model_dump(), sort_keys=False), encoding="utf-8"
-        )
+        write_whole(self.path(vault), yaml.safe_dump(self.model_dump(), sort_keys=False))
+
+
+def write_whole(path: Path, text: str) -> None:
+    """Write a text file in one step, so that a write that fails half way leaves the old file.
+
+    The text goes to a hidden file in the same folder, which then takes the file's place.
+    A full disk or a Ctrl+C can stop the first part, never the swap, and the hidden file is
+    removed in every case.
+    """
+    temp = path.with_name(f".{path.name}.{secrets.token_hex(4)}.tmp")
+    try:
+        temp.write_text(text, encoding="utf-8")
+        os.replace(temp, path)
+    finally:
+        temp.unlink(missing_ok=True)
 
 
 def decide_path(vault: Path, name: str) -> Path:

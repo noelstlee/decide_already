@@ -635,3 +635,34 @@ def test_delete_original_removes_the_file_its_card_note_and_empty_folders(tmp_pa
     assert (tmp_path / "_dump").is_dir()
     with pytest.raises(FileNotFoundError, match="no file with the id 'hw3/a.txt'"):
         vault.delete_original(tmp_path, "hw3/a.txt")
+
+
+def test_a_write_that_fails_half_way_leaves_the_old_note_whole(root, monkeypatch):
+    """A full disk while a note is rewritten: the note on disk is still the old one, all of it."""
+    path = vault.write_card_note(root, placement("a.txt", frozen=True), "the old card\n")
+    before = path.read_text(encoding="utf-8")
+
+    def full_disk(self, *args, **kwargs):
+        """Stand in for Path.write_text: write half, then fail like a full disk."""
+        with open(self, "w", encoding="utf-8") as handle:
+            handle.write(args[0][: len(args[0]) // 2])
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(type(path), "write_text", full_disk)
+    with pytest.raises(OSError, match="No space"):
+        vault.write_card_note(root, placement("a.txt", group_id="hw"), "the new card\n")
+    monkeypatch.undo()
+    assert path.read_text(encoding="utf-8") == before
+    assert [p.name for p in path.parent.iterdir()] == [path.name]  # no temporary file is left
+    # The config and a set file are written the same way.
+    config = Config.load(root)
+    (root / "_groups" / "Exams.md").write_text(
+        "---\nid: exams\ncovers: midterms\n---\n", encoding="utf-8"
+    )
+    for write in (lambda: config.save(root), lambda: vault.sync_group_set(root)):
+        monkeypatch.setattr(type(path), "write_text", full_disk)
+        with pytest.raises(OSError):
+            write()
+        monkeypatch.undo()
+    assert Config.load(root) == config
+    assert "Exams" not in [group.name for group in vault.latest_set(root).groups]

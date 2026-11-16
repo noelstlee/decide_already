@@ -20,6 +20,7 @@ from .config import (
     Config,
     clean_dump_dir,
     folder_key,
+    write_whole,
     yaml_problem,
 )
 from .types import Group, GroupSet, Placement, StrictModel
@@ -92,9 +93,9 @@ def read_note(path: Path) -> tuple[dict, str]:
 
 
 def write_note(path: Path, frontmatter: dict, body: str = "") -> None:
-    """Write a markdown note: the frontmatter between --- lines, then the body."""
+    """Write a markdown note: the frontmatter between --- lines, then the body (see write_whole)."""
     front = yaml.safe_dump(frontmatter, sort_keys=False, allow_unicode=True)
-    path.write_text(f"---\n{front}---\n{body}", encoding="utf-8")
+    write_whole(path, f"---\n{front}---\n{body}")
 
 
 def slugify(name: str) -> str:
@@ -355,8 +356,9 @@ def sync_group_set(root: Path) -> GroupSet:
     if current is not None:
         _free_old_folders(root, current.groups, groups)
     new = GroupSet(version=1 if current is None else current.version + 1, groups=groups)
-    _set_path(root, new.version).write_text(
-        yaml.safe_dump(new.model_dump(), sort_keys=False, allow_unicode=True), encoding="utf-8"
+    write_whole(
+        _set_path(root, new.version),
+        yaml.safe_dump(new.model_dump(), sort_keys=False, allow_unicode=True),
     )
     return new
 
