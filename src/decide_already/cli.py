@@ -16,6 +16,7 @@ from .backends import make_backend
 from .backends.base import BackendError
 from .board import BoardFile, build_board
 from .config import UNSORTED_DIR, Config
+from .extract.base import count
 from .sort import sort_vault
 
 # Why a file is in Unsorted, in the words the board shows.
@@ -33,14 +34,6 @@ VaultOption = Annotated[
 ]
 
 
-def _root(vault_path: Path | None) -> Path:
-    """The vault to work on: the --vault folder, or the nearest vault at or above this folder."""
-    try:
-        return vault_path.resolve() if vault_path else vault.find_vault(Path.cwd())
-    except FileNotFoundError as error:
-        _fail(str(error))
-
-
 def _fail(message: str) -> None:
     """Print an error line and exit with status 1."""
     typer.echo(f"error: {message}", err=True)
@@ -48,8 +41,14 @@ def _fail(message: str) -> None:
 
 
 def _vault_root(vault_path: Path | None) -> Path:
-    """Like _root, but fails when the folder has not been set up as a vault."""
-    root = _root(vault_path)
+    """The vault to work on: the --vault folder, or the nearest vault at or above this folder.
+
+    Fails when there is none, or when the --vault folder has not been set up as a vault.
+    """
+    try:
+        root = vault_path.resolve() if vault_path else vault.find_vault(Path.cwd())
+    except FileNotFoundError as error:
+        _fail(str(error))
     if not Config.path(root).exists():
         _fail(f"no vault at {root}; run `p0 init` first")
     return root
@@ -228,11 +227,6 @@ def _group_names(root: Path) -> dict[str | None, str]:
     return names
 
 
-def _count(number: int, noun: str) -> str:
-    """A number with its noun, as in "1 file" and "3 files"."""
-    return f"{number} {noun}" if number == 1 else f"{number} {noun}s"
-
-
 @app.command("move")
 def move_file(
     file: Annotated[str, typer.Argument(help="File id, or a file name that only one file has.")],
@@ -259,7 +253,7 @@ def freeze_files(ref: FileOrGroup, vault_path: VaultOption = None) -> None:
         _fail(str(error))
     for file_id in file_ids:
         typer.echo(f"frozen: {file_id}")
-    typer.echo(f"Froze {_count(len(file_ids), 'file')}." if file_ids else "Nothing to freeze.")
+    typer.echo(f"Froze {count(len(file_ids), 'file')}." if file_ids else "Nothing to freeze.")
 
 
 @app.command("unfreeze")
@@ -272,7 +266,7 @@ def unfreeze_files(ref: FileOrGroup, vault_path: VaultOption = None) -> None:
         _fail(str(error))
     for file_id in file_ids:
         typer.echo(f"unfrozen: {file_id}")
-    typer.echo(f"Unfroze {_count(len(file_ids), 'file')}." if file_ids else "Nothing to unfreeze.")
+    typer.echo(f"Unfroze {count(len(file_ids), 'file')}." if file_ids else "Nothing to unfreeze.")
 
 
 @app.command("suggest")
@@ -290,7 +284,7 @@ def suggest_moves(vault_path: VaultOption = None) -> None:
         suggested = names.get(item.suggested_group, item.suggested_group)
         typer.echo(f"{item.file_id}: in {current}, would now go to {suggested}")
     if found:
-        typer.echo(f"{_count(len(found), 'suggestion')}. Nothing was moved.")
+        typer.echo(f"{count(len(found), 'suggestion')}. Nothing was moved.")
     else:
         typer.echo("No suggestions.")
     for file_id, message in failed.items():
