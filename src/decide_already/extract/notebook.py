@@ -24,7 +24,7 @@ def extract_notebook(path: Path) -> Extracted:
     The outline lists the markdown headings first, then the functions and classes in code cells.
     """
     try:
-        cells = json.loads(read_text(path) or "")["cells"]
+        cells = json.loads(read_text(path, whole=True) or "")["cells"]
         cells = [cell for cell in cells if isinstance(cell, dict)]
     except (ValueError, TypeError, KeyError, RecursionError):
         return Extracted(file_type=LABEL)  # not JSON, or not shaped like a notebook

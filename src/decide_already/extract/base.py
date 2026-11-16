@@ -13,6 +13,9 @@ MAX_OUTLINE = 40  # outline entries kept per file
 MAX_OUTLINE_CHARS = 120  # longest outline entry
 MAX_TITLE_CHARS = 200  # longest title
 BINARY_PROBE_BYTES = 8192  # a NUL byte this early in a file marks it as binary
+# shortcut: the card of a text file over 8 MB is built from its first 8 MB (excerpts included).
+# A whole 1 GB dataset in memory can kill a sort; raise this if a real file needs more.
+MAX_TEXT_BYTES = 8_000_000
 
 # Control characters say nothing to a reader, and PDF math fonts leave many of them in the text.
 # They are dropped. Tab and newline stay; the other line breaks (vertical tab, form feed,
@@ -38,18 +41,20 @@ class Extracted(StrictModel):
     text: str = ""  # all extracted text; "" when nothing could be extracted
 
 
-def read_text(path: Path) -> str | None:
+def read_text(path: Path, whole: bool = False) -> str | None:
     """Read a file as UTF-8 text, cleaned as `clean` does. Bytes that are not UTF-8 are replaced.
 
     Returns None for a binary file (a NUL byte in its first 8 KB) or one that cannot be opened.
-    Only the first 8 KB of a binary file are read, so a video in the dump costs nothing.
+    Only the first 8 KB of a binary file are read, so a video in the dump costs nothing, and
+    only the first MAX_TEXT_BYTES of a text file, unless `whole` (a notebook is JSON, and
+    half of it cannot be read).
     """
     try:
         with path.open("rb") as handle:
             data = handle.read(BINARY_PROBE_BYTES)
             if b"\x00" in data:
                 return None
-            data += handle.read()
+            data += handle.read() if whole else handle.read(MAX_TEXT_BYTES - len(data))
     except OSError:
         return None
     return clean(data.decode("utf-8-sig", errors="replace"))

@@ -810,3 +810,17 @@ def test_title_is_capped_at_200_characters(tmp_path):
     result = extract(write(tmp_path / "wide.txt", "word " * 500))
     assert len(result.title) <= 200
     assert len(result.text) == len("word " * 500) - 1
+
+
+def test_a_text_file_is_read_up_to_the_cap_and_a_notebook_whole(tmp_path, monkeypatch):
+    """A big dataset is read only up to MAX_TEXT_BYTES; a notebook is JSON and is read whole."""
+    from decide_already.extract import base
+
+    monkeypatch.setattr(base, "MAX_TEXT_BYTES", 10_000)
+    big = tmp_path / "data.csv"
+    big.write_text("a,b\n" * 5_000, encoding="utf-8")  # 20,000 bytes
+    assert len(extract(big).text) == 10_000 - 1  # cut at the cap, then the end space stripped
+    notebook = tmp_path / "lab.ipynb"
+    cell = {"cell_type": "markdown", "source": "# Lab 1\n" + "x" * 30_000}
+    notebook.write_text(json.dumps({"cells": [cell]}), encoding="utf-8")
+    assert extract(notebook).title == "Lab 1"

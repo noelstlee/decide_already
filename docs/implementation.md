@@ -66,7 +66,7 @@ def extract(path: Path) -> Extracted   # dispatches on the file extension
 | HTML | `.html`, `.htm` | `<title>` or first `<h1>` | `h1` to `h3` | visible text; only `<main>` or `<article>` when present; scripts, styles and nav dropped (stdlib `html.parser`) |
 | Anything else or binary (type `Binary file`) | | none | none | `""` |
 
-Read text as UTF-8 with `errors="replace"`. A file with NUL bytes in its first 8 KB is binary. Images are dropped. Text is cleaned: control characters and base64 data URIs are removed. For Markdown and notebooks, leading headings that start with "Copyright" or "License" are passed over for the title (they stay in the outline); when there is no other heading, the first one is kept. A file with no text gets `text=""` and later goes to Unsorted with reason `no_text`. Extractors never raise on a damaged file: they return `text=""`.
+Read text as UTF-8 with `errors="replace"`. A file with NUL bytes in its first 8 KB is binary. Only the first 8 MB of a text file is read (`MAX_TEXT_BYTES`), so its card, excerpts included, comes from that part; a notebook is read whole, since it is JSON. Images are dropped. Text is cleaned: control characters and base64 data URIs are removed. For Markdown and notebooks, leading headings that start with "Copyright" or "License" are passed over for the title (they stay in the outline); when there is no other heading, the first one is kept. A file with no text gets `text=""` and later goes to Unsorted with reason `no_text`. Extractors never raise on a damaged file: they return `text=""`.
 
 ## Card (`card.py`)
 
