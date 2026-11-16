@@ -1308,3 +1308,20 @@ def test_a_call_log_that_cannot_be_written_stops_the_run_like_the_spend_cap(root
     assert [request.file_id for request in backend.calls] == ["a.txt", "b.txt"]
     assert [note.placement.file_id for note in vault.read_card_notes(root)] == ["a.txt"]
     assert progress == [(1, 3)]
+
+
+def test_two_files_that_need_one_card_note_name_give_a_clear_error(root):
+    """a/b.txt and a__b.txt both map to the note a__b.txt.md: the second is refused, not lost.
+
+    Pinned on purpose (audit 2026-11-16, finding 3): a layout that avoids the clash would
+    change the vault layout, which is not approved. The first note is never written over.
+    """
+    drop(root, "a/b.txt", "Homework one.\n")
+    drop(root, "a__b.txt", "Homework two.\n")
+    for _ in range(2):  # the same on every run
+        report = sort_vault(root, FakeBackend(default=TO_HW))
+        assert report.errors == {
+            "a__b.txt": "HW/a__b.txt.md exists and is not the card note of a__b.txt"
+        }
+    (note,) = vault.read_card_notes(root)
+    assert note.placement.file_id == "a/b.txt"
