@@ -844,7 +844,7 @@ def test_make_backend_without_a_key_raises(tmp_path, monkeypatch):
     monkeypatch.setattr(backends, "env_value", no_key)
     with pytest.raises(BackendError, match="TYPESAFE_API_KEY"):
         make_backend(tmp_path, Config())
-    assert asked == [("TYPESAFE_API_KEY", tmp_path)]
+    assert asked == [("TYPESAFE_API_KEY", tmp_path), ("TYPESAFE_API_KEY", None)]
 
 
 def test_make_backend_uses_the_key_from_the_environment_and_the_vault_log(
@@ -867,6 +867,19 @@ def test_make_backend_finds_the_key_in_a_dotenv_file_above_the_vault(tmp_path, w
     make_backend(root, Config()).sort(request_for())
     assert wire.requests[0].headers["authorization"] == f"Bearer {KEY}"
     assert KEY not in (root / ".decide" / "jev.jsonl").read_text()
+
+
+def test_make_backend_finds_the_key_in_the_folder_p0_runs_from(tmp_path, monkeypatch, wire):
+    """A vault kept outside the repo: the key in the repo's .env is still found."""
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    repo, root = tmp_path / "repo", tmp_path / "elsewhere" / "vault"
+    repo.mkdir()
+    root.mkdir(parents=True)
+    (repo / ".env").write_text(f"TYPESAFE_API_KEY={KEY}\n")
+    monkeypatch.chdir(repo)
+    wire.handler = lambda request: ok()
+    make_backend(root, Config()).sort(request_for())
+    assert wire.requests[0].headers["authorization"] == f"Bearer {KEY}"
 
 
 # Threads

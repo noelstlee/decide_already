@@ -30,7 +30,7 @@ Everything runs from the repo root. Commands start with `uv run`, so there is no
    uv sync
    ```
 
-3. Put your TypeSafe key in a `.env` file at the repo root (gitignored). Copy `.env.example` and fill in `TYPESAFE_API_KEY=...`. For the LLM baseline only, add `ANTHROPIC_API_KEY=...`.
+3. Put your TypeSafe key in a `.env` file at the repo root (gitignored). Copy `.env.example` and fill in `TYPESAFE_API_KEY=...`. For the LLM baseline only, add `ANTHROPIC_API_KEY=...`. An exported `TYPESAFE_API_KEY` works too. p0 looks in the environment first, then for a `.env` in the vault or a folder above it, then in the folder you run p0 from or a folder above it, so a vault kept outside the repo works when you run p0 from the repo. Only `p0 sort` and `p0 suggest` (and Sort on the page) need the key.
 
 ### Smoke test from scratch
 

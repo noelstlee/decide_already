@@ -67,7 +67,9 @@ class JevBackend:
         api_key = (api_key or "").strip()
         if not api_key:
             raise BackendError(
-                f"no TypeSafe API key found: set {API_KEY_ENV} in the environment or in a .env file"
+                f"no TypeSafe API key found: set {API_KEY_ENV} in the environment, or in a .env "
+                "file in the vault, in the folder you run p0 from, or in a folder above either "
+                "(copy .env.example to .env and fill it in)"
             )
         self._config = config
         self._log_path = log_path

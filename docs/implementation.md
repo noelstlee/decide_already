@@ -141,7 +141,7 @@ class JevBackend:
     def sort(self, request: SortRequest) -> SortResult: ...
     def close(self) -> None: ...
 
-def make_backend(root: Path, config: Config) -> Backend   # in backends/__init__.py; key from env_value("TYPESAFE_API_KEY", root)
+def make_backend(root: Path, config: Config) -> Backend   # in backends/__init__.py; key from env_value("TYPESAFE_API_KEY", root), else from the current folder up
 ```
 
 - One `TypeSafeClient` per backend, built with the key, a `RetryPolicy` (up to 4 retries on 408, 429 and 5xx with backoff, honors Retry-After, 60 seconds in all) and a 30 second timeout per HTTP operation. `transport` is for tests.
