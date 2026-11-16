@@ -44,6 +44,10 @@ class BudgetExceeded(RunStopped):
     """The vault's spend cap was reached, so no request was sent."""
 
 
+class KeyRejected(RunStopped):
+    """The API refused the key (401 or 403). Every later call would be refused the same way."""
+
+
 class LogFailed(RunStopped):
     """The call log cannot be written. Every call must be logged, so the run stops."""
 

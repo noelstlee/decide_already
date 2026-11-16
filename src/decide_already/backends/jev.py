@@ -18,15 +18,24 @@ from typesafe_sdk import (
     RetryPolicy,
     SystemOneResponse,
     TypeSafeAPIResponseValidationError,
+    TypeSafeAuthenticationError,
     TypeSafeClient,
     TypeSafeError,
+    TypeSafePermissionDeniedError,
 )
 
 from ..config import Config
 from ..log import append_jsonl, check_appendable, total_input_tokens
 from ..questions import FITS_ANY_QUESTION, GROUP_QUESTION, build_questions
 from ..types import Group
-from .base import BackendError, BudgetExceeded, LogFailed, SortRequest, SortResult
+from .base import (
+    BackendError,
+    BudgetExceeded,
+    KeyRejected,
+    LogFailed,
+    SortRequest,
+    SortResult,
+)
 
 API_KEY_ENV = "TYPESAFE_API_KEY"
 REQUEST_ID_HEADER = "x-typesafe-request-id"
@@ -90,7 +99,8 @@ class JevBackend:
 
         Raises BudgetExceeded, without sending, once the spend cap is reached, and LogFailed,
         without sending, when the log cannot be added to. Raises BackendError when the call fails
-        or its answer cannot be used; that call is logged with status "error". Raises LogFailed
+        or its answer cannot be used; that call is logged with status "error". When the failure
+        is the API refusing the key, that error is KeyRejected, which ends the run. Raises LogFailed
         when a call went out and its line could not be written. A call that is interrupted
         (Ctrl+C, or any error that is not the SDK's own) is logged as such, and the interruption
         is passed on.
@@ -120,6 +130,7 @@ class JevBackend:
             "error": None,
         }
         response = None
+        refused = False  # the API refused the key
         started = time.perf_counter()
         try:
             response = self._client.system_one(
@@ -132,6 +143,7 @@ class JevBackend:
             record["input_tokens"] = response.usage.input_tokens
             record["error"] = self._problem(response, request.groups)
         except TypeSafeError as error:
+            refused = isinstance(error, TypeSafeAuthenticationError | TypeSafePermissionDeniedError)
             record["error"] = self._without_key(f"{type(error).__name__}: {error}")
             record["request_id"] = getattr(error, "request_id", None)
             self._keep_answer(record, error)
@@ -146,6 +158,11 @@ class JevBackend:
                 error.add_note(str(failed))
             raise
         self._log(record, started)
+        if refused:
+            raise KeyRejected(
+                f"TypeSafe refused the API key ({record['error']}); check {API_KEY_ENV} in the "
+                "environment or in your .env file. The run stopped after this one call"
+            )
         # Raised here, not inside the except block above, so the SDK's error is not chained to
         # ours: it can quote the server's reply, which we only pass on with the key blanked out.
         if record["status"] == "error":

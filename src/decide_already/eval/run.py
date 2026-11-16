@@ -16,7 +16,7 @@ groups. A pass runs after the configurations, when the one it copies is in the r
 
 Every Jev request, those of the passes included, goes through one JevBackend that logs to the
 vault's own Jev log, so the vault's spend cap covers the whole evaluation. When a backend says
-the run must stop (RunStopped: the cap is reached, or the call log cannot be written), the run
+the run must stop (RunStopped: the cap is reached, the call log cannot be written, or the key is refused), the run
 stops asking, still writes the report from what is cached, says why, and exits with status 2.
 A configuration whose backend cannot be built (Jev or the LLM without a key) is pending: it is
 skipped, and the report says why.
@@ -203,7 +203,7 @@ def _ask(
     """Ask a backend about one file and make its cache row: the answer, or the failure.
 
     This runs in a worker thread. `fixed` holds the row's fields that do not depend on the
-    answer. A RunStopped (the spend cap, a call log that cannot be written) says nothing about
+    answer. A RunStopped (the spend cap, a call log that cannot be written, a refused key) says nothing about
     the file, so it is passed on for the run to stop on.
     """
     per_state: list[SortResult] = []

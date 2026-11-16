@@ -32,7 +32,7 @@ How the spec in [phase0.md](phase0.md) maps to code. This is the working contrac
 - Tests never call a real API. The fake backend lives in `tests/fakes.py`, never in `src/`. HTTP is mocked only inside tests (`httpx2.MockTransport` for the Jev client).
 - Tests use `tmp_path` vaults built with `vault.init_vault`. The page's script is run under node with a stand-in for the browser, in `tests/test_ui_api.py` (skipped when node is missing).
 - Originals in the dump folder are opened read-only. Nothing in `src/` writes, moves or deletes there, with two exceptions: the UI upload, which only adds new files (it keeps its own hidden `.p0-upload-*` file there while a body arrives and removes it again), and `vault.delete_original`, which deletes one file the user named by its exact id (the page's Files view, `p0 remove`). No function renames or removes the dump folder, the folder it sits in, or a tool folder, whatever a group is called.
-- A failure that is about the run and not about one file is a `RunStopped`: the spend cap (`BudgetExceeded`) or a call log that cannot be written (`LogFailed`). The sorter, `suggest` and the evaluation runner end the run on either.
+- A failure that is about the run and not about one file is a `RunStopped`: the spend cap (`BudgetExceeded`), a call log that cannot be written (`LogFailed`), or the API refusing the key with 401 or 403 (`KeyRejected`, after that one call is logged). The sorter, `suggest` and the evaluation runner end the run on any of them.
 - Only `backends/jev.py` imports `typesafe_sdk`. Only `eval/baselines/` imports `fastembed` or `anthropic`.
 - The model version always comes from `Config.model` and is passed on every call.
 

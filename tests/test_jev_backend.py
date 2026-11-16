@@ -18,6 +18,7 @@ from decide_already.backends import jev, make_backend
 from decide_already.backends.base import (
     BackendError,
     BudgetExceeded,
+    KeyRejected,
     LogFailed,
     RunStopped,
     SortRequest,
@@ -880,6 +881,19 @@ def test_make_backend_finds_the_key_in_the_folder_p0_runs_from(tmp_path, monkeyp
     wire.handler = lambda request: ok()
     make_backend(root, Config()).sort(request_for())
     assert wire.requests[0].headers["authorization"] == f"Bearer {KEY}"
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_a_refused_key_stops_the_run_after_one_logged_call(tmp_path, status):
+    """A wrong key would be refused on every call, so the first refusal ends the run."""
+    server = Server(lambda request, number: refusal(status))
+    with pytest.raises(KeyRejected) as caught:
+        backend_on(server, tmp_path).sort(request_for())
+    assert "TYPESAFE_API_KEY" in str(caught.value)
+    assert KEY not in str(caught.value)
+    (line,) = read_jsonl(tmp_path / "jev.jsonl")
+    assert line["status"] == "error"
+    assert len(server.requests) == 1
 
 
 # Threads
