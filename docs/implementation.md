@@ -368,7 +368,6 @@ Card notes whose source file is gone from the dump are listed in `missing_source
 | `GET /api/dump` | every file in the dump folder: `{dump_dir, files: [{file_id, size, modified}]}`, for the Files view |
 | `DELETE /api/dump/{file_id:path}` | deletes one original for good, with its card note, and withdraws its label (`corrections.delete_file`); 404 for an id that is not a file of the dump, 409 while a sort runs |
 | `PUT /api/dump/{name}` | adds one file to the dump folder from the raw request body. The body is collected under a hidden name (`.p0-upload-<random>`), which `dump_files` skips, and linked to its own name with `os.link` once it is whole. Never overwrites (409) and never accepts a path; a body cut short answers 400 and leaves nothing |
-| `POST /api/suggest` | runs `suggest` and returns `{suggestions: [...], failed: {file_id: reason}}` (served and tested; the page has no control for it yet) |
 
 Errors come back as `{"detail": "..."}`: 400 bad input, 403 a request from another site, 404 unknown id, 409 conflict (a sort is running, a name is taken, a file exists, the backend cannot be built), 500 for other OS errors and for any error no handler knows (the detail then names the error's type and message, and a sort that hits one ends with the same text in its status). File ids are checked against `dump_files` and never joined to a path, so no request can reach outside the vault.
 

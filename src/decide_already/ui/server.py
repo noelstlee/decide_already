@@ -306,8 +306,8 @@ def _group_answer(group_set: GroupSet, group_id: str) -> dict:
 def create_app(root: Path, backend_factory: Callable[[], Backend] | None = None) -> FastAPI:
     """Build the web app for one vault.
 
-    `backend_factory` gives the backend for a sort or a suggest; tests pass one that returns
-    a fake. Without it the real backend is built, and only when a sort or a suggest starts,
+    `backend_factory` gives the backend for a sort; tests pass one that returns
+    a fake. Without it the real backend is built, and only when a sort starts,
     so the page opens without an API key.
     """
     root = root.resolve()
@@ -341,7 +341,7 @@ def create_app(root: Path, backend_factory: Callable[[], Backend] | None = None)
 
     @contextmanager
     def backend() -> Iterator[Backend]:
-        """The backend for one sort or suggest. The real one is built here and closed after."""
+        """The backend for one sort. The real one is built here and closed after."""
         if backend_factory is not None:
             yield backend_factory()
             return
@@ -623,18 +623,6 @@ def create_app(root: Path, backend_factory: Callable[[], Backend] | None = None)
             dump_path(file_id)
             removed = corrections.delete_file(root, file_id)
         return {"deleted": file_id, "card_notes_removed": removed}
-
-    @app.post("/api/suggest")
-    def suggest() -> dict:
-        """Ask the model about every frozen file, and list the ones it would now place elsewhere.
-
-        Nothing moves. `failed` holds the files the model could not be asked about, with the
-        reason: a failure is not an answer, so it is not agreement either.
-        """
-        failed: dict[str, str] = {}
-        with changing(), backend() as model:
-            found = corrections.suggest(root, model, failed)
-        return {"suggestions": [item.model_dump(mode="json") for item in found], "failed": failed}
 
     app.mount("/static", FreshStaticFiles(directory=STATIC_DIR), name="static")
     return app

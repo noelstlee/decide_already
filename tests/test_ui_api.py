@@ -27,7 +27,6 @@ from decide_already.cli import app as cli
 from decide_already.config import (
     JEV_LOG_FILE,
     LABELS_FILE,
-    SUGGESTIONS_FILE,
     Config,
     decide_path,
 )
@@ -123,7 +122,7 @@ def backend():
 
 @pytest.fixture
 def client(root, backend):
-    """A test client for the vault's app. Sorts and suggests use the fake."""
+    """A test client for the vault's app. Sorts use the fake."""
     return TestClient(create_app(root, lambda: backend), base_url=BASE_URL)
 
 
@@ -350,7 +349,6 @@ def test_every_route_of_the_contract_is_served(client):
         ("PATCH", "/api/groups/{group_id}"),
         ("DELETE", "/api/groups/{group_id}"),
         ("PUT", "/api/dump/{name:path}"),
-        ("POST", "/api/suggest"),
     }
 
 
@@ -1168,7 +1166,6 @@ def test_only_one_sort_runs_and_nothing_changes_the_vault_meanwhile(root):
         client.post("/api/groups", json={"name": "Exams", "covers": "exams"}),
         client.patch("/api/groups/hw", json={"covers": "homework"}),
         client.delete("/api/groups/hw"),
-        client.post("/api/suggest"),
     ]
     for answer in changes:
         assert is_error(answer, 409)
@@ -1275,7 +1272,7 @@ def test_sort_that_hits_a_bug_still_ends(root):
     wait_for_sort(client)
 
 
-def test_real_backend_is_built_only_when_a_sort_or_suggest_starts(root, monkeypatch):
+def test_real_backend_is_built_only_when_a_sort_starts(root, monkeypatch):
     """Without a factory the page opens with no API key. The key is asked for by the sort."""
     asked = []
 
@@ -1298,14 +1295,9 @@ def test_real_backend_is_built_only_when_a_sort_or_suggest_starts(root, monkeypa
     assert asked == [(root.resolve(), "jev-1.14.0")]
     assert where(root) == {}
 
-    answer = client.post("/api/suggest")
-    assert is_error(answer, 409)
-    assert "TYPESAFE_API_KEY" in answer.json()["detail"]
-    assert len(asked) == 2
-
 
 def test_real_backend_is_closed_after_each_use(root, monkeypatch):
-    """The backend the app builds itself is closed when the sort or the suggest is over."""
+    """The backend the app builds itself is closed when the sort is over."""
 
     class ClosableBackend(FakeBackend):
         """A fake that counts how often it is closed, as the Jev client must be."""
@@ -1322,61 +1314,6 @@ def test_real_backend_is_closed_after_each_use(root, monkeypatch):
     client = TestClient(create_app(root), base_url=BASE_URL)
     sort_now(client)
     assert ClosableBackend.closed == 1
-    assert client.post("/api/suggest").status_code == 200
-    assert ClosableBackend.closed == 2
-
-
-# POST /api/suggest
-
-
-def test_suggest_lists_frozen_files_the_model_would_now_place_elsewhere(client, backend, root):
-    """Only frozen files are asked about. A differing answer is listed, and nothing moves."""
-    sort_now(client)
-    client.post("/api/freeze", json={"file_id": SOLUTION})
-    client.post("/api/freeze", json={"file_id": SYLLABUS})
-    backend.answers[SOLUTION] = ({"hw": 0.1, "logistics": 0.1, "project": 0.8}, 0.9)
-    asked_before = len(backend.calls)
-
-    answer = client.post("/api/suggest")
-    assert answer.status_code == 200
-    body = answer.json()
-    assert sorted(body) == ["failed", "suggestions"]
-    assert body["failed"] == {}
-    (found,) = body["suggestions"]
-    assert (found["file_id"], found["current_group"], found["suggested_group"]) == (
-        SOLUTION,
-        "hw",
-        "project",
-    )
-    assert (found["probs"], found["fits_any"]) == (
-        {"hw": 0.1, "logistics": 0.1, "project": 0.8},
-        0.9,
-    )
-    assert (found["set_version"], found["model"]) == (3, "fake-0")
-    assert [request.file_id for request in backend.calls[asked_before:]] == [SOLUTION, SYLLABUS]
-    assert where(root)[SOLUTION] == "HW"
-    assert [line["file_id"] for line in read_jsonl(decide_path(root, SUGGESTIONS_FILE))] == [
-        SOLUTION
-    ]
-
-
-def test_suggest_says_which_files_could_not_be_asked_about(client, backend, root):
-    """A failure is not agreement: the file is listed under `failed` with the reason."""
-    sort_now(client)
-    client.post("/api/freeze", json={"file_id": SOLUTION})
-    backend.fail.add(SOLUTION)
-    body = client.post("/api/suggest").json()
-    assert body["suggestions"] == []
-    assert list(body["failed"]) == [SOLUTION]
-    assert "told to fail" in body["failed"][SOLUTION]
-
-
-def test_suggest_with_nothing_frozen(client, backend):
-    """No frozen files: nothing to ask, nothing to suggest."""
-    sort_now(client)
-    asked_before = len(backend.calls)
-    assert client.post("/api/suggest").json() == {"suggestions": [], "failed": {}}
-    assert len(backend.calls) == asked_before
 
 
 # Errors and where requests may come from
