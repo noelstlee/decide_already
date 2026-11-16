@@ -1013,3 +1013,14 @@ def test_remove_asks_first_and_deletes_only_on_yes(root):
     result = runner.invoke(app, ["remove", "a.txt", "--yes", *vault])
     assert result.exit_code == 1
     assert "error: no file with the id 'a.txt'" in result.output
+
+
+def test_a_broken_set_file_is_an_error_line_from_every_command(root, monkeypatch):
+    """A set file cut off half way: each command names it, with no traceback."""
+    place(root, "a.txt", "hw")
+    broken = root / ".decide" / "sets" / "v4.yaml"
+    broken.write_text("version: 4\ngroups:\n- id: hw\n  name: [", encoding="utf-8")
+    use_backend(monkeypatch, FakeBackend())
+    for command in EVERY_COMMAND:
+        output = fails_with_a_line(root, command)
+        assert f"{broken} is not valid YAML" in output, command

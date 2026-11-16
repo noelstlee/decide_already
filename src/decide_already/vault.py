@@ -232,7 +232,10 @@ def _set_path(root: Path, version: int) -> Path:
 
 
 def latest_set(root: Path) -> GroupSet | None:
-    """Load the highest-numbered set version, or None if no set has been written yet."""
+    """Load the highest-numbered set version, or None if no set has been written yet.
+
+    Raises ValueError that names the file when it is not valid YAML.
+    """
     versions = []
     for path in (root / DECIDE_DIR / SETS_DIR).glob("v*.yaml"):
         match = _SET_FILE.fullmatch(path.name)
@@ -240,7 +243,11 @@ def latest_set(root: Path) -> GroupSet | None:
             versions.append(int(match.group(1)))
     if not versions:
         return None
-    data = yaml.safe_load(_set_path(root, max(versions)).read_text(encoding="utf-8"))
+    path = _set_path(root, max(versions))
+    try:
+        data = yaml.load(path.read_text(encoding="utf-8"), Loader=YAML_LOADER)
+    except yaml.YAMLError as error:
+        raise ValueError(f"{path} is not valid YAML: {yaml_problem(error)}") from None
     return GroupSet.model_validate(data)
 
 
