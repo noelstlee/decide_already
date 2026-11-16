@@ -188,7 +188,7 @@ The fixes are in five commits after the build commits, each with tests. The suit
 - **A close call cannot happen with the default cutoffs.** A file is placed only when its top probability is 0.6 or more. That leaves at most 0.4 for the second group, a gap of at least 0.2, and the close call margin is 0.15. Options: lower the top cutoff under 0.575, raise the margin, or flag a placement as a close call when the top probability is under some value such as 0.8.
 - **`p0 init --dump .` is now refused**, and so is a dump folder outside the vault. The originals have to sit in a folder of their own inside the vault.
 - **PyMuPDF is AGPL-3.0.** It constrains the repo's license. It is used only in `extract/pdf.py`; pypdf (BSD) is a possible swap.
-- **`.gitignore` ignores `.claude/` and `.env.example`.** Probably not intended for `.env.example`, and the project `CLAUDE.md` is described as checked in.
+- **`.gitignore` ignores `.claude/`**, so the project `CLAUDE.md` is not in a clone. `.env.example` was ignored too; it is tracked since 2026-11-16.
 - **Not seen in a real browser:** PDF originals opened from the page under the new security headers. The app's own browser pane downloads PDFs instead of showing them.
 - Smaller open items are listed under "Still open" in [decisions.md](decisions.md).
 

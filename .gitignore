@@ -10,7 +10,6 @@ sandbox/
 data/
 vaults/
 .claude/
-.env.example
 
 # Tool state if a test vault is created inside the repo
 .decide/
