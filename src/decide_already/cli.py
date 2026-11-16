@@ -305,14 +305,14 @@ def remove_file(
     yes: Annotated[bool, typer.Option("--yes", help="Do not ask before deleting.")] = False,
     vault_path: VaultOption = None,
 ) -> None:
-    """Delete a file from the dump folder for good, with its card note. Labels stay."""
+    """Delete a file from the dump folder for good, with its card note. Its label is withdrawn."""
     root = _vault_root(vault_path)
     if not yes and not typer.confirm(
         f"Delete {file} from the dump folder? This cannot be undone.", default=False
     ):
         _fail("nothing was deleted")
     try:
-        removed = vault.delete_original(root, file)
+        removed = corrections.delete_file(root, file)
     except (ValueError, OSError) as error:
         _fail(str(error))
     note = " and its card note" if removed else ""

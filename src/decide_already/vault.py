@@ -602,8 +602,8 @@ def delete_original(root: Path, file_id: str) -> int:
     The file is matched by its exact id in the dump listing, never joined to a path, so
     nothing outside the dump folder can be named. A link in the dump is removed as a link;
     what it points to stays. Folders inside the dump that are left with nothing in them go
-    too (the dump folder itself never does). Labels in .decide/labels.jsonl stay: they are
-    the record of what the user decided. Returns how many card notes were removed.
+    too (the dump folder itself never does). Labels in .decide/labels.jsonl are not touched
+    here (corrections.delete_file withdraws an active one). Returns how many card notes were removed.
     Raises FileNotFoundError for an id that is not a file in the dump folder.
     """
     config = Config.load(root)

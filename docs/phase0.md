@@ -246,7 +246,7 @@ Commands come first; Obsidian (or Finder) is the board, and `p0 ui` opens a mini
 | Freeze | `p0 freeze <file or group>` (or set `frozen: true` in the card note) | Jev won't re-sort it | A confirmation: Jev's pick accepted |
 | Unfreeze | `p0 unfreeze <file or group>` | Back in the next rerun | The unfreeze |
 | Check frozen files | `p0 suggest` | Lists frozen files Jev would now place elsewhere; nothing moves | Suggestions, kept apart from labels |
-| Delete a file from the dump | `p0 remove <file id>`, or Delete in the page's Files view | The original and its card note are deleted for good, after a yes | Nothing new; earlier labels stay |
+| Delete a file from the dump | `p0 remove <file id>`, or Delete in the page's Files view | The original and its card note are deleted for good, after a yes | An active label is withdrawn ("unfrozen"); earlier lines stay |
 | Pick up edits made in Obsidian | `p0 sync` | Reads moved notes, frontmatter edits and group-note edits | Moves and freezes as labels; group edits as a new set |
 | See the board | `p0 board` | Groups, Unsorted and close calls, with probabilities | Nothing |
 

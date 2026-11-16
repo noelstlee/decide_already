@@ -87,6 +87,25 @@ def _write_label(
     append_jsonl(decide_path(root, LABELS_FILE), label.model_dump(mode="json"))
 
 
+def _withdraw(root: Path, label: Label, set_version: int) -> None:
+    """Withdraw a file's active label with an "unfrozen" line, for a file that has no card note.
+
+    The line goes from and to the label's group, with no probabilities: there is no note to
+    take them from. The earlier lines stay, as the record of what the user decided.
+    """
+    withdrawn = Label(
+        file_id=label.file_id,
+        kind="unfrozen",
+        from_group=label.to_group,
+        to_group=label.to_group,
+        jev_probs=None,
+        jev_set_version=None,
+        set_version=set_version,
+        at=_now(),
+    )
+    append_jsonl(decide_path(root, LABELS_FILE), withdrawn.model_dump(mode="json"))
+
+
 def _changed(placement: Placement, **changes: object) -> Placement:
     """A copy of a placement with some fields changed, checked like any other record."""
     return Placement.model_validate({**placement.model_dump(), **changes})
@@ -415,17 +434,7 @@ def unfreeze(root: Path, ref: str, *, kind: RefKind | None = None) -> list[str]:
     set_version = sync(root).set_version
     label = _label_without_note(root, ref, kind)
     if label is not None:
-        withdrawn = Label(
-            file_id=ref,
-            kind="unfrozen",
-            from_group=label.to_group,
-            to_group=label.to_group,
-            jev_probs=None,
-            jev_set_version=None,
-            set_version=set_version,
-            at=_now(),
-        )
-        append_jsonl(decide_path(root, LABELS_FILE), withdrawn.model_dump(mode="json"))
+        _withdraw(root, label, set_version)
         return [ref]
     unfrozen = []
     for note in _selected(root, ref, kind):
@@ -433,6 +442,22 @@ def unfreeze(root: Path, ref: str, *, kind: RefKind | None = None) -> list[str]:
             unfreeze_note(root, note, set_version)
             unfrozen.append(note.placement.file_id)
     return unfrozen
+
+
+def delete_file(root: Path, file_id: str) -> int:
+    """Delete one file from the dump for good, with its card note, and withdraw its label.
+
+    The file is deleted first (see vault.delete_original), so a delete that fails changes
+    nothing. When the file had an active label, an "unfrozen" line follows: a file added
+    later under the same id is a new file, and the sorter must not hold it back for a
+    correction made to the old one. Returns how many card notes were removed.
+    """
+    label = active_labels(root).get(file_id)
+    current = vault.latest_set(root)
+    removed = vault.delete_original(root, file_id)
+    if label is not None:
+        _withdraw(root, label, current.version if current else 0)
+    return removed
 
 
 def suggest(root: Path, backend: Backend, failed: dict[str, str] | None = None) -> list[Suggestion]:

@@ -232,7 +232,7 @@ def folder_for(root: Path, group_id: str | None) -> Path               # group n
 def group_id_of_folder(root: Path, folder: str) -> str | None          # raises KeyError for a folder that is no current group
 ```
 
-- `delete_original` is the only code that removes an original. It takes the file by its exact id in the dump listing (never a joined path), removes a link as a link, removes the file's card notes, and removes folders inside the dump that are left empty (never the dump folder itself). Labels stay: they record what the user decided.
+- `delete_original` is the only code that removes an original. It takes the file by its exact id in the dump listing (never a joined path), removes a link as a link, removes the file's card notes, and removes folders inside the dump that are left empty (never the dump folder itself). Labels stay: they record what the user decided. The commands and the page call it through `corrections.delete_file`, which then withdraws the file's active label with an "unfrozen" line, so a file added later under the same id is sorted as a new file.
 - `dump_files` walks the dump folder recursively and skips any path with a component that starts with a dot. It does not follow symlinked folders. The file id is the path relative to the dump folder, with forward slashes.
 - A card note is a markdown file whose frontmatter holds a valid `Placement` once other keys are set aside. Other keys (a tag or any property added in Obsidian) are kept in `extras` and written back after the placement fields by `write_card_note` and by every rewrite in `corrections`. The body is `render_card(card)`.
 - A card note sits in its group's folder (the folder is named after the group) or in `Unsorted/`. The folder a note is under is the file's current group. `placement.group_id` is the group as of the last write or sync.
@@ -366,7 +366,7 @@ Card notes whose source file is gone from the dump are listed in `missing_source
 | `PATCH /api/groups/{group_id}` | any of `name`, `covers`, `excludes` |
 | `DELETE /api/groups/{group_id}` | deletes the group |
 | `GET /api/dump` | every file in the dump folder: `{dump_dir, files: [{file_id, size, modified}]}`, for the Files view |
-| `DELETE /api/dump/{file_id:path}` | deletes one original for good, with its card note (`vault.delete_original`); 404 for an id that is not a file of the dump, 409 while a sort runs |
+| `DELETE /api/dump/{file_id:path}` | deletes one original for good, with its card note, and withdraws its label (`corrections.delete_file`); 404 for an id that is not a file of the dump, 409 while a sort runs |
 | `PUT /api/dump/{name}` | adds one file to the dump folder from the raw request body. The body is collected under a hidden name (`.p0-upload-<random>`), which `dump_files` skips, and linked to its own name with `os.link` once it is whole. Never overwrites (409) and never accepts a path; a body cut short answers 400 and leaves nothing |
 | `POST /api/suggest` | runs `suggest` and returns `{suggestions: [...], failed: {file_id: reason}}` (served and tested; the page has no control for it yet) |
 

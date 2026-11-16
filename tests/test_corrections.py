@@ -12,6 +12,7 @@ from decide_already.config import LABELS_FILE, SUGGESTIONS_FILE, Config, decide_
 from decide_already.corrections import (
     SyncReport,
     active_labels,
+    delete_file,
     freeze,
     move_file,
     read_labels,
@@ -1754,3 +1755,29 @@ def test_unfreezing_a_labeled_file_without_a_note_goes_by_its_exact_id(root):
     assert sorted(active_labels(root)) == ["week1/notes.txt"]
     assert unfreeze(root, "week1/notes.txt") == ["week1/notes.txt"]
     assert active_labels(root) == {}
+
+
+def test_deleting_a_corrected_file_withdraws_its_label_so_a_new_one_is_sorted(root):
+    """Replacing a file is delete, then add: the new file must not inherit the old correction."""
+    place(root, "hw3.txt", "hw")
+    move_file(root, "hw3.txt", "Logistics")
+    assert delete_file(root, "hw3.txt") == 1
+    assert labels(root) == [
+        label("hw3.txt", "moved", "hw", "logistics"),
+        label(
+            "hw3.txt", "unfrozen", "logistics", "logistics", jev_probs=None, jev_set_version=None
+        ),
+    ]
+    assert active_labels(root) == {}
+
+    drop(root, "hw3.txt", "Homework 3, the new version.\n")
+    report = sort_vault(root, FakeBackend(default=TO_HW))
+    assert report.errors == {}
+    assert state(root, "hw3.txt") == ("HW", "hw", "jev", False)
+
+
+def test_deleting_a_file_with_no_label_writes_none(root):
+    """A file nobody corrected has nothing to withdraw."""
+    place(root, "a.txt", "hw")
+    assert delete_file(root, "a.txt") == 1
+    assert labels(root) == []

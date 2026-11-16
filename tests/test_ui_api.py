@@ -629,7 +629,7 @@ def test_dump_listing_gives_every_file_with_its_size(client, root):
 
 
 def test_delete_removes_the_original_and_its_card_note(client, root):
-    """Deleting a sorted file takes it out of the dump and off the board. Labels stay."""
+    """Deleting a sorted file takes it out of the dump and off the board. Its label is withdrawn."""
     sort_now(client)
     moved = client.post("/api/move", json={"file_id": SHEET, "group_id": "logistics"})
     assert moved.status_code == 200
@@ -645,7 +645,10 @@ def test_delete_removes_the_original_and_its_card_note(client, root):
     ]
     assert SHEET not in on_board
     assert SHEET not in board["new_files"]
-    assert labels(root) == [("moved", SHEET, "project", "logistics")]  # the record stays
+    assert labels(root) == [
+        ("moved", SHEET, "project", "logistics"),  # the record stays
+        ("unfrozen", SHEET, "logistics", "logistics"),  # and the correction is withdrawn
+    ]
     assert (root / "_dump" / EXAMPLES).exists()  # the folder still holds the other file
 
 

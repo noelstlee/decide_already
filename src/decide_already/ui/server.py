@@ -621,7 +621,7 @@ def create_app(root: Path, backend_factory: Callable[[], Backend] | None = None)
         that is not a file there, 409 while a sort runs."""
         with changing():
             dump_path(file_id)
-            removed = vault.delete_original(root, file_id)
+            removed = corrections.delete_file(root, file_id)
         return {"deleted": file_id, "card_notes_removed": removed}
 
     @app.post("/api/suggest")
